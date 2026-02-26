@@ -1,9 +1,9 @@
 import "dotenv/config"
 import cors from "cors"
 import express from "express"
-import morgan from "morgan"
 import { z } from "zod"
 import type { Request, Response } from "express"
+import { MorganAdapter } from "./logs/adapter/morgan-adapter.js"
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
@@ -18,7 +18,13 @@ const env = envSchema.parse(process.env)
 
 const app = express()
 
-app.use(morgan("dev"))
+if (env.NODE_ENV !== "production") {
+  const logger = MorganAdapter.create({
+    options: { skip: (req: Request) => req.path === "/health" },
+  })
+  app.use(logger.middleware())
+}
+
 app.use(express.json())
 app.use(
   cors({
@@ -40,6 +46,10 @@ app.get("/soroban/config", (_req: Request, res: Response) => {
     networkPassphrase: env.SOROBAN_NETWORK_PASSPHRASE,
     contractId: env.SOROBAN_CONTRACT_ID ?? null,
   })
+})
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason)
 })
 
 app.listen(env.PORT, () => {
