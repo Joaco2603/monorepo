@@ -6,17 +6,7 @@ import { z } from "zod"
 import type { Request, Response } from "express"
 import { validate } from "./middleware/validate.js"
 import { simulateContractSchema, type SimulateContractInput } from "./schemas/soroban.js"
-
-const envSchema = z.object({
-  PORT: z.coerce.number().default(4000),
-  NODE_ENV: z.string().default("development"),
-  CORS_ORIGINS: z.string().default("http://localhost:3000"),
-  SOROBAN_RPC_URL: z.string().url().default("https://soroban-testnet.stellar.org"),
-  SOROBAN_NETWORK_PASSPHRASE: z.string().default("Test SDF Network ; September 2015"),
-  SOROBAN_CONTRACT_ID: z.string().optional(),
-})
-
-const env = envSchema.parse(process.env)
+import { env } from "./schemas/env.js"
 
 const app = express()
 
