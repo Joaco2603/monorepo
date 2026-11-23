@@ -1,10 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { DashboardHeader } from "@/components/dashboard-header";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  EmptyState,
+  ErrorState,
+  ListRowSkeleton,
+  LoadingState,
+  StatCardSkeleton,
+} from "@/components/ui/data-state";
 import {
   Plus,
   TrendingUp,
@@ -14,92 +21,116 @@ import {
   Star,
   DollarSign,
   Home,
-  Menu,
-  X,
 } from "lucide-react";
 import {
-  whistleblowerData,
-  whistleblowerEarnings as earnings,
-  whistleblowerListings as listings,
-} from "@/lib/mockData";
+  getWhistleblowerDashboardData,
+  type WhistleblowerDashboardData,
+} from "@/lib/api/whistleblowerDashboard";
+import useAuthStore from "@/store/useAuthStore";
+import { DashboardSidebar } from "@/components/dashboard/DashboardSidebar";
+import {
+  DashboardA11yEnhancer,
+  DASHBOARD_MAIN_ID,
+} from "@/components/dashboard/DashboardA11yEnhancer";
 
 export default function WhistleblowerDashboard() {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { user } = useAuthStore();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<WhistleblowerDashboardData | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const result = await getWhistleblowerDashboardData();
+      setData(result);
+      setError(null);
+    } catch (err) {
+      console.error("Failed to fetch whistleblower data:", err);
+      setError(
+        "Failed to connect to live data. Please ensure the backend is running.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background p-4 pt-24 md:p-8 md:pt-28">
+        <LoadingState
+          label="Loading your whistleblower dashboard"
+          className="mx-auto max-w-5xl space-y-8"
+        >
+          <div className="grid gap-4 md:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <StatCardSkeleton key={`wb-stat-${index}`} />
+            ))}
+          </div>
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <ListRowSkeleton key={`wb-row-${index}`} />
+            ))}
+          </div>
+        </LoadingState>
+      </div>
+    );
+  }
+
+  // Use live data if available, otherwise show error
+  const dashboardData = data?.stats;
+  const listings = data?.listings || [];
+  const earnings = data?.earnings || [];
+
+  if (error && !data) {
+    return (
+      <div className="flex min-h-screen w-full flex-col items-center justify-center bg-background p-4">
+        <ErrorState
+          className="w-full max-w-md"
+          title="We couldn't reach your dashboard"
+          description={error}
+          onRetry={fetchData}
+          retryLabel="Retry connection"
+        />
+      </div>
+    );
+  }
+
+  if (!dashboardData) return null;
 
   return (
     <div className="min-h-screen bg-background">
+      <DashboardA11yEnhancer />
       <DashboardHeader />
 
-      {/* Mobile Menu Button */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center border-3 border-foreground bg-primary shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] lg:hidden"
-      >
-        {sidebarOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-      </button>
-
-      {/* Mobile Overlay */}
-      {sidebarOpen && (
-        <button
-          type="button"
-          aria-label="Close sidebar"
-          className="fixed inset-0 z-40 bg-foreground/50 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed left-0 top-0 z-40 h-screen w-64 border-r-3 border-foreground bg-card pt-20 transition-transform lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
-      >
-        <div className="flex h-full flex-col px-4 py-6">
-          <div className="mb-8 border-3 border-foreground bg-secondary p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <p className="text-sm font-medium text-foreground">Whistleblower</p>
-            <p className="text-lg font-bold text-foreground">
-              {whistleblowerData.name}
-            </p>
+      <DashboardSidebar
+        role="whistleblower"
+        userInfo={{
+          name: user?.name ?? "Whistleblower",
+          roleLabel: "",
+          extra: (
             <div className="mt-2 flex items-center gap-1">
               <Star className="h-4 w-4 fill-accent text-accent" />
-              <span className="text-sm font-bold">
-                {whistleblowerData.rating}
-              </span>
+              <span className="text-sm font-bold">{dashboardData.rating}</span>
               <span className="text-xs text-muted-foreground">
-                ({whistleblowerData.reviews} reviews)
+                ({dashboardData.reviews} reviews)
               </span>
             </div>
-          </div>
-
-          <nav className="flex-1 space-y-2">
-            <Link
-              href="/whistleblower/dashboard"
-              className="flex items-center gap-3 border-3 border-foreground bg-primary p-3 font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Home className="h-5 w-5" />
-              Dashboard
-            </Link>
-            <Link
-              href="/whistleblower/report"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Plus className="h-5 w-5" />
-              Report Apartment
-            </Link>
-            <Link
-              href="/whistleblower/earnings"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <DollarSign className="h-5 w-5" />
-              Earnings
-            </Link>
-          </nav>
-        </div>
-      </aside>
+          ),
+        }}
+      />
 
       {/* Main Content */}
-      <main className="min-h-screen pt-20 lg:ml-64">
+      <main
+        id={DASHBOARD_MAIN_ID}
+        tabIndex={-1}
+        className="min-h-screen pt-20 lg:ml-64"
+      >
         <div className="p-4 md:p-6 lg:p-8">
           {/* Header */}
           <div className="mb-8">
@@ -123,7 +154,7 @@ export default function WhistleblowerDashboard() {
                     Total Earnings
                   </p>
                   <p className="truncate text-xl font-bold text-foreground md:text-3xl">
-                    ₦{whistleblowerData.earnings.toLocaleString()}
+                    ₦{dashboardData.totalEarnings.toLocaleString()}
                   </p>
                 </div>
               </div>
@@ -139,7 +170,8 @@ export default function WhistleblowerDashboard() {
                     Reports This Month
                   </p>
                   <p className="truncate text-xl font-bold text-foreground md:text-3xl">
-                    {whistleblowerData.reportsThisMonth}/2
+                    {dashboardData.reportsThisMonth}/
+                    {dashboardData.maxReportsPerMonth}
                   </p>
                 </div>
               </div>
@@ -155,7 +187,7 @@ export default function WhistleblowerDashboard() {
                     Active Listings
                   </p>
                   <p className="truncate text-xl font-bold text-foreground md:text-3xl">
-                    {whistleblowerData.activeListings}
+                    {dashboardData.activeListings}
                   </p>
                 </div>
               </div>
@@ -171,7 +203,7 @@ export default function WhistleblowerDashboard() {
                     Rating
                   </p>
                   <p className="truncate text-xl font-bold text-foreground md:text-3xl">
-                    {whistleblowerData.rating}⭐
+                    {dashboardData.rating}⭐
                   </p>
                 </div>
               </div>
@@ -179,7 +211,8 @@ export default function WhistleblowerDashboard() {
           </div>
 
           {/* Report Limit Warning */}
-          {whistleblowerData.reportsThisMonth >= 2 && (
+          {dashboardData.reportsThisMonth >=
+            dashboardData.maxReportsPerMonth && (
             <div className="mb-8 border-3 border-destructive bg-red-100 p-4 rounded-sm">
               <div className="flex gap-2">
                 <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
@@ -188,8 +221,9 @@ export default function WhistleblowerDashboard() {
                     Monthly Limit Reached
                   </p>
                   <p className="text-xs text-destructive/80">
-                    You've reached your 2 apartment limit for this month. Come
-                    back next month to report more.
+                    You've reached your {dashboardData.maxReportsPerMonth}{" "}
+                    apartment limit for this month. Come back next month to
+                    report more.
                   </p>
                 </div>
               </div>
@@ -202,7 +236,8 @@ export default function WhistleblowerDashboard() {
               <h2 className="font-mono text-lg font-bold md:text-xl">
                 Your Active Listings
               </h2>
-              {whistleblowerData.reportsThisMonth < 2 && (
+              {dashboardData.reportsThisMonth <
+                dashboardData.maxReportsPerMonth && (
                 <Link href="/whistleblower/report">
                   <Button className="border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
                     <Plus className="mr-2 h-4 w-4" />
@@ -213,54 +248,71 @@ export default function WhistleblowerDashboard() {
             </div>
 
             <div className="space-y-4">
-              {listings.map((listing) => (
-                <Card
-                  key={listing.id}
-                  className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] md:p-6"
-                >
-                  <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                    <div>
-                      <h3 className="text-lg font-bold text-foreground md:text-xl">
-                        {listing.address}
-                      </h3>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        ₦{listing.price.toLocaleString()}/year • {listing.beds}{" "}
-                        bed(s) • {listing.baths} bath(s)
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-2">
-                        Posted: {listing.postedDate}
-                      </p>
-                    </div>
-
-                    <div className="flex gap-4">
-                      <div className="flex flex-col items-center gap-1 border-l-2 border-foreground pl-4">
-                        <p className="text-xs text-muted-foreground">Views</p>
-                        <p className="text-lg font-bold">{listing.views}</p>
+              {listings.length === 0 ? (
+                <EmptyState
+                  icon={Home}
+                  title="No active listings"
+                  description="Report a vacant apartment you know of — you earn a reward once a tenant rents it through Shelterflex."
+                  action={{
+                    label: "Report an apartment",
+                    href: "/whistleblower/report",
+                  }}
+                />
+              ) : (
+                listings.map((listing) => (
+                  <Card
+                    key={listing.id}
+                    className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] md:p-6"
+                  >
+                    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <h3 className="text-lg font-bold text-foreground md:text-xl">
+                          {listing.address}
+                        </h3>
+                        <p className="text-sm text-muted-foreground mt-1">
+                          ₦{listing.price.toLocaleString()}/year •{" "}
+                          {listing.beds} bed(s) • {listing.baths} bath(s)
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          Posted: {listing.postedDate}
+                        </p>
                       </div>
 
-                      <div className="flex flex-col items-center gap-1 border-l-2 border-foreground pl-4">
-                        <p className="text-xs text-muted-foreground">Status</p>
-                        <div
-                          className={`text-sm font-bold ${listing.status === "rented" ? "text-secondary" : "text-primary"}`}
-                        >
-                          {listing.status === "rented" ? "✓ Rented" : "Active"}
+                      <div className="flex gap-4">
+                        <div className="flex flex-col items-center gap-1 border-l-2 border-foreground pl-4">
+                          <p className="text-xs text-muted-foreground">Views</p>
+                          <p className="text-lg font-bold">{listing.views}</p>
                         </div>
-                      </div>
 
-                      {listing.status === "rented" && (
                         <div className="flex flex-col items-center gap-1 border-l-2 border-foreground pl-4">
                           <p className="text-xs text-muted-foreground">
-                            Earned
+                            Status
                           </p>
-                          <p className="text-lg font-bold text-primary">
-                            ₦{listing.earnings.toLocaleString()}
-                          </p>
+                          <div
+                            className={`text-sm font-bold ${listing.status === "rented" ? "text-secondary" : "text-primary"}`}
+                          >
+                            {listing.status === "rented"
+                              ? "✓ Rented"
+                              : listing.status.charAt(0).toUpperCase() +
+                                listing.status.slice(1)}
+                          </div>
                         </div>
-                      )}
+
+                        {listing.status === "rented" && (
+                          <div className="flex flex-col items-center gap-1 border-l-2 border-foreground pl-4">
+                            <p className="text-xs text-muted-foreground">
+                              Earned
+                            </p>
+                            <p className="text-lg font-bold text-primary">
+                              ₦{listing.earnings.toLocaleString()}
+                            </p>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </Card>
-              ))}
+                  </Card>
+                ))
+              )}
             </div>
           </div>
 
@@ -270,38 +322,50 @@ export default function WhistleblowerDashboard() {
               Recent Earnings
             </h2>
             <div className="space-y-3">
-              {earnings.map((earning) => (
-                <Card
-                  key={`${earning.listing}-${earning.date}-${earning.amount}-${earning.status}`}
-                  className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-                >
-                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                    <div>
-                      <p className="text-sm font-bold">{earning.listing}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {earning.date}
-                      </p>
-                    </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <p className="text-lg font-bold text-primary">
-                        +₦{earning.amount.toLocaleString()}
-                      </p>
-                      <div
-                        className={`flex items-center gap-1 px-3 py-1 border-2 border-foreground text-xs font-bold ${earning.status === "completed" ? "bg-secondary" : "bg-accent"}`}
-                      >
-                        {earning.status === "completed" ? (
-                          <CheckCircle className="h-4 w-4" />
-                        ) : (
-                          <Clock className="h-4 w-4" />
-                        )}
-                        {earning.status === "completed"
-                          ? "Completed"
-                          : "Pending"}
+              {earnings.length === 0 ? (
+                <EmptyState
+                  icon={DollarSign}
+                  title="No earnings yet"
+                  description="Rewards land here after a tenant you reported completes their first payment."
+                  action={{
+                    label: "Report an apartment",
+                    href: "/whistleblower/report",
+                  }}
+                />
+              ) : (
+                earnings.map((earning, idx) => (
+                  <Card
+                    key={`${earning.listing}-${earning.date}-${idx}`}
+                    className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+                  >
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <p className="text-sm font-bold">{earning.listing}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {earning.date}
+                        </p>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <p className="text-lg font-bold text-primary">
+                          +₦{earning.amount.toLocaleString()}
+                        </p>
+                        <div
+                          className={`flex items-center gap-1 px-3 py-1 border-2 border-foreground text-xs font-bold ${earning.status === "completed" ? "bg-secondary" : "bg-accent"}`}
+                        >
+                          {earning.status === "completed" ? (
+                            <CheckCircle className="h-4 w-4" />
+                          ) : (
+                            <Clock className="h-4 w-4" />
+                          )}
+                          {earning.status === "completed"
+                            ? "Completed"
+                            : "Pending"}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </Card>
-              ))}
+                  </Card>
+                ))
+              )}
             </div>
           </div>
         </div>

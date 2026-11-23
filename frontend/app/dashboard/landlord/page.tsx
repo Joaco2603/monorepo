@@ -1,14 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  Home,
   Plus,
   Building2,
   Users,
   MessageSquare,
-  Settings,
   MapPin,
   Bed,
   Bath,
@@ -17,11 +15,17 @@ import {
   Edit,
   Trash2,
   Eye,
-  Menu,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  MoneyValue,
+  StatCardSkeleton,
+} from "@/components/ui/data-state";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,104 +33,155 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { DashboardHeader } from "@/components/dashboard-header";
+import { DashboardSidebar } from "@/components/dashboard/DashboardSidebar";
 import {
-  landlordDashboardStats as stats,
-  landlordMyProperties as myProperties,
-} from "@/lib/mockData";
-
-// Mock data for landlord's properties
+  getLandlordDashboardStats,
+  listLandlordProperties,
+  listPropertyApplications,
+  type LandlordDashboardStats,
+  type LandlordPropertyRecord,
+  type LandlordApplicationRecord,
+} from "@/lib/landlordPropertiesApi";
 
 export default function LandlordDashboard() {
   const [activeTab, setActiveTab] = useState<"properties" | "applications">(
     "properties",
   );
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const [stats, setStats] = useState<LandlordDashboardStats | null>(null);
+  const [properties, setProperties] = useState<LandlordPropertyRecord[]>([]);
+  const [applications, setApplications] = useState<
+    Record<string, LandlordApplicationRecord[]>
+  >({});
+
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [propertiesLoading, setPropertiesLoading] = useState(true);
+  const [propertiesError, setPropertiesError] = useState<string | null>(null);
+
+  const loadStats = useCallback(() => {
+    getLandlordDashboardStats()
+      .then((data) => {
+        setStats(data);
+        setStatsError(null);
+      })
+      .catch((err) => {
+        console.error("Failed to load stats:", err);
+        setStatsError(
+          err instanceof Error ? err.message : "Failed to load stats",
+        );
+      })
+      .finally(() => setStatsLoading(false));
+  }, []);
+
+  const loadProperties = useCallback(() => {
+    listLandlordProperties()
+      .then(async (res) => {
+        setProperties(res.properties);
+
+        const appPromises = res.properties
+          .filter((p) => p.listingId)
+          .map((p) =>
+            listPropertyApplications(p.listingId!)
+              .then((appRes) => ({
+                listingId: p.listingId!,
+                apps: appRes.applications,
+              }))
+              .catch(() => ({ listingId: p.listingId!, apps: [] })),
+          );
+
+        const appResults = await Promise.all(appPromises);
+        const appMap: Record<string, LandlordApplicationRecord[]> = {};
+        appResults.forEach(({ listingId, apps }) => {
+          appMap[listingId] = apps;
+        });
+
+        setApplications(appMap);
+        setPropertiesError(null);
+      })
+      .catch((err) => {
+        console.error("Failed to load properties:", err);
+        setPropertiesError(
+          err instanceof Error ? err.message : "Failed to load properties",
+        );
+      })
+      .finally(() => setPropertiesLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadStats();
+  }, [loadStats]);
+
+  useEffect(() => {
+    loadProperties();
+  }, [loadProperties]);
+
+  // Retry handlers reset to the loading state before re-fetching. Kept separate
+  // from the loaders above so the mount effects never call setState synchronously.
+  const retryStats = useCallback(() => {
+    setStatsLoading(true);
+    setStatsError(null);
+    loadStats();
+  }, [loadStats]);
+
+  const retryProperties = useCallback(() => {
+    setPropertiesLoading(true);
+    setPropertiesError(null);
+    loadProperties();
+  }, [loadProperties]);
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat("en-NG", {
+      style: "currency",
+      currency: "NGN",
+      minimumFractionDigits: 0,
+    }).format(amount);
+  };
+
+  // `money` entries go through MoneyValue so an absent figure renders as a dash
+  // rather than as ₦0, which a landlord could reasonably read as "earned zero".
+  const statsData = [
+    {
+      label: "Total Properties",
+      value: stats?.totalProperties ?? null,
+      money: false,
+      icon: Building2,
+      color: "bg-primary",
+    },
+    {
+      label: "Active Listings",
+      value: stats?.activeListings ?? null,
+      money: false,
+      icon: Building2,
+      color: "bg-secondary",
+    },
+    {
+      label: "Total Views",
+      value: stats?.totalViews ?? null,
+      money: false,
+      icon: Eye,
+      color: "bg-accent",
+    },
+    {
+      label: "Monthly Revenue",
+      value: stats?.monthlyRevenueNgn ?? null,
+      money: true,
+      icon: Building2,
+      color: "bg-primary",
+    },
+  ];
 
   return (
     <div className="min-h-screen bg-background">
       <DashboardHeader />
 
-      {/* Mobile Menu Button */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center border-3 border-foreground bg-primary shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] lg:hidden"
-      >
-        {sidebarOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-      </button>
+      <DashboardSidebar
+        role="landlord"
+        userInfo={{ name: "Chief Okonkwo", roleLabel: "Landlord" }}
+      />
 
-      {/* Mobile Overlay */}
-      {sidebarOpen && (
-        <button
-          type="button"
-          aria-label="Close sidebar"
-          className="fixed inset-0 z-40 bg-foreground/50 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed left-0 top-0 z-40 h-screen w-64 border-r-3 border-foreground bg-card pt-20 transition-transform lg:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
-      >
-        <div className="flex h-full flex-col px-4 py-6">
-          <div className="mb-8 border-3 border-foreground bg-accent p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <p className="text-sm font-medium text-foreground">Logged in as</p>
-            <p className="text-lg font-bold text-foreground">Chief Okonkwo</p>
-            <p className="text-sm text-muted-foreground">Landlord</p>
-          </div>
-
-          <nav className="flex-1 space-y-2">
-            <Link
-              href="/dashboard/landlord"
-              className="flex items-center gap-3 border-3 border-foreground bg-primary p-3 font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Home className="h-5 w-5" />
-              Dashboard
-            </Link>
-            <Link
-              href="/dashboard/landlord/properties"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Building2 className="h-5 w-5" />
-              My Properties
-            </Link>
-            <Link
-              href="/dashboard/landlord/tenants"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Users className="h-5 w-5" />
-              My Tenants
-            </Link>
-            <Link
-              href="/messages"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <MessageSquare className="h-5 w-5" />
-              Messages
-              <span className="ml-auto flex h-6 w-6 items-center justify-center border-2 border-foreground bg-destructive text-xs font-bold text-destructive-foreground">
-                3
-              </span>
-            </Link>
-            <Link
-              href="/dashboard/landlord/settings"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Settings className="h-5 w-5" />
-              Settings
-            </Link>
-          </nav>
-        </div>
-      </aside>
-
-      {/* Main Content */}
       <main className="min-h-screen pt-20 lg:ml-64">
         <div className="p-4 md:p-6 lg:p-8">
-          {/* Header */}
           <div className="mb-6 flex flex-col gap-4 md:mb-8 md:flex-row md:items-center md:justify-between">
             <div>
               <h1 className="text-2xl font-bold text-foreground md:text-3xl lg:text-4xl">
@@ -144,35 +199,65 @@ export default function LandlordDashboard() {
             </Link>
           </div>
 
-          {/* Stats Grid */}
-          <div className="mb-6 grid grid-cols-2 gap-3 md:mb-8 md:grid-cols-4 md:gap-6">
-            {stats.map((stat) => (
-              <Card
-                key={stat.label}
-                className="border-3 border-foreground p-3 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] md:p-6"
-              >
-                <div className="flex items-center gap-2 md:gap-4">
-                  <div
-                    className={`flex h-10 w-10 shrink-0 items-center justify-center border-3 border-foreground md:h-14 md:w-14 ${stat.color}`}
-                  >
-                    <stat.icon className="h-5 w-5 md:h-7 md:w-7" />
+          {statsLoading ? (
+            <LoadingState
+              label="Loading portfolio stats"
+              className="mb-6 grid grid-cols-2 gap-3 md:mb-8 md:grid-cols-4 md:gap-6"
+            >
+              {Array.from({ length: 4 }).map((_, index) => (
+                <StatCardSkeleton key={`stats-loading-${index}`} />
+              ))}
+            </LoadingState>
+          ) : statsError ? (
+            <ErrorState
+              className="mb-6 md:mb-8"
+              title="Stats are currently unavailable"
+              description={statsError}
+              onRetry={retryStats}
+            />
+          ) : (
+            <div className="mb-6 grid grid-cols-2 gap-3 md:mb-8 md:grid-cols-4 md:gap-6">
+              {statsData.map((stat) => (
+                <Card
+                  key={stat.label}
+                  className="border-3 border-foreground p-3 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] md:p-6"
+                >
+                  <div className="flex items-center gap-2 md:gap-4">
+                    <div
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center border-3 border-foreground md:h-14 md:w-14 ${stat.color}`}
+                    >
+                      <stat.icon className="h-5 w-5 md:h-7 md:w-7" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-medium text-muted-foreground md:text-sm">
+                        {stat.label}
+                      </p>
+                      <p className="truncate text-xl font-bold text-foreground md:text-3xl">
+                        {stat.money ? (
+                          <MoneyValue
+                            status="ready"
+                            amount={stat.value}
+                            format={formatCurrency}
+                          />
+                        ) : (
+                          (stat.value?.toLocaleString() ?? "—")
+                        )}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="truncate text-xs font-medium text-muted-foreground md:text-sm">
-                      {stat.label}
-                    </p>
-                    <p className="truncate text-xl font-bold text-foreground md:text-3xl">
-                      {stat.value}
-                    </p>
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
+                </Card>
+              ))}
+            </div>
+          )}
 
-          {/* Tabs */}
-          <div className="mb-6 flex flex-wrap gap-2 md:gap-4">
+          <div
+            className="mb-6 flex flex-wrap gap-2 md:gap-4"
+            role="tablist"
+            aria-label="Dashboard sections"
+          >
             <button
+              role="tab"
+              aria-selected={activeTab === "properties"}
               onClick={() => setActiveTab("properties")}
               className={`border-3 border-foreground px-3 py-2 text-sm font-bold transition-all md:px-6 md:py-3 md:text-base ${
                 activeTab === "properties"
@@ -184,114 +269,191 @@ export default function LandlordDashboard() {
             </button>
           </div>
 
-          {/* Properties Tab */}
           {activeTab === "properties" && (
             <div className="grid gap-6">
-              {myProperties.map((property) => {
-                let statusBadgeClassName = "bg-muted"
-                if (property.status === "active") {
-                  statusBadgeClassName = "bg-secondary"
-                } else if (property.status === "pending") {
-                  statusBadgeClassName = "bg-accent"
-                }
+              {propertiesLoading ? (
+                <LoadingState label="Loading your properties" className="grid gap-6">
+                  {Array.from({ length: 2 }).map((_, index) => (
+                    <Card
+                      key={`properties-loading-${index}`}
+                      className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+                    >
+                      <Skeleton className="mb-4 h-6 w-56" />
+                      <Skeleton className="mb-2 h-4 w-40" />
+                      <Skeleton className="h-32 w-full" />
+                    </Card>
+                  ))}
+                </LoadingState>
+              ) : propertiesError ? (
+                <ErrorState
+                  title="Property data is unavailable"
+                  description={propertiesError}
+                  onRetry={retryProperties}
+                />
+              ) : properties.length === 0 ? (
+                <EmptyState
+                  icon={Building2}
+                  title="No properties yet"
+                  description="List your first property to start receiving applications from verified tenants."
+                  action={{
+                    label: "Add your first property",
+                    href: "/dashboard/landlord/properties/new",
+                  }}
+                />
+              ) : (
+                properties.map((property) => {
+                  let statusBadgeClassName = "bg-muted";
+                  let statusLabel = "Inactive";
 
-                let statusLabel = "Inactive"
-                if (property.status === "active") {
-                  statusLabel = "Active"
-                } else if (property.status === "pending") {
-                  statusLabel = "Pending"
-                }
+                  if (
+                    property.status === "active" ||
+                    property.status === "approved"
+                  ) {
+                    statusBadgeClassName = "bg-secondary";
+                    statusLabel = "Active";
+                  } else if (
+                    property.status === "pending" ||
+                    property.status === "pending_review"
+                  ) {
+                    statusBadgeClassName = "bg-accent";
+                    statusLabel = "Pending";
+                  }
 
-                return (
-                  <Card
-                    key={property.id}
-                    className="border-3 border-foreground p-0 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-                  >
-                    <div className="flex">
-                    {/* Property Image */}
-                    <div className="relative h-48 w-72 shrink-0 border-r-3 border-foreground bg-muted">
-                      <div className="flex h-full items-center justify-center">
-                        <Building2 className="h-16 w-16 text-muted-foreground" />
-                      </div>
-                      <div
-                        className={`absolute left-3 top-3 border-2 border-foreground px-3 py-1 text-sm font-bold ${statusBadgeClassName}`}
-                      >
-                        {statusLabel}
-                      </div>
-                    </div>
+                  const propertyApps = property.listingId
+                    ? applications[property.listingId] || []
+                    : [];
+                  const pendingApps = propertyApps.filter(
+                    (app) => app.status === "pending",
+                  );
+                  const pendingCount = pendingApps.length;
 
-                    {/* Property Details */}
-                    <div className="flex flex-1 flex-col p-6">
-                      <div className="mb-4 flex items-start justify-between">
-                        <div>
-                          <h3 className="text-xl font-bold text-foreground">
-                            {property.title}
-                          </h3>
-                          <p className="mt-1 flex items-center gap-1 text-muted-foreground">
-                            <MapPin className="h-4 w-4" />
-                            {property.location}
-                          </p>
-                        </div>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="icon"
-                              className="border-3 border-foreground bg-transparent"
+                  return (
+                    <Card
+                      key={property.id}
+                      className="border-3 border-foreground p-0 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+                    >
+                      <div className="flex">
+                        <div className="relative h-48 w-72 shrink-0 border-r-3 border-foreground bg-muted">
+                          <div className="flex h-full items-center justify-center">
+                            <Building2 className="h-16 w-16 text-muted-foreground" />
+                          </div>
+                          <div
+                            className={`absolute left-3 top-3 border-2 border-foreground px-3 py-1 text-sm font-bold ${statusBadgeClassName}`}
+                          >
+                            {statusLabel}
+                          </div>
+                          {pendingCount > 0 && property.listingId && (
+                            <Link
+                              href={`/dashboard/landlord/properties/${property.listingId}/applications`}
+                              aria-label={`${pendingCount} pending application${pendingCount !== 1 ? "s" : ""} for ${property.title}`}
+                              className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center border-2 border-foreground bg-destructive text-xs font-bold text-destructive-foreground shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[1px_1px_0px_0px_rgba(26,26,26,1)]"
                             >
-                              <MoreVertical className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent className="border-3 border-foreground">
-                            <DropdownMenuItem>
-                              <Edit className="mr-2 h-4 w-4" /> Edit Property
-                            </DropdownMenuItem>
-                            <DropdownMenuItem>
-                              <Eye className="mr-2 h-4 w-4" /> View Listing
-                            </DropdownMenuItem>
-                            <DropdownMenuItem className="text-destructive">
-                              <Trash2 className="mr-2 h-4 w-4" /> Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
+                              <span aria-hidden="true">{pendingCount}</span>
+                            </Link>
+                          )}
+                        </div>
 
-                      <div className="mb-4 flex gap-6">
-                        <span className="flex items-center gap-1 text-sm font-medium">
-                          <Bed className="h-4 w-4" /> {property.beds} Beds
-                        </span>
-                        <span className="flex items-center gap-1 text-sm font-medium">
-                          <Bath className="h-4 w-4" /> {property.baths} Baths
-                        </span>
-                        <span className="flex items-center gap-1 text-sm font-medium">
-                          <Square className="h-4 w-4" /> {property.sqm} sqm
-                        </span>
-                      </div>
+                        <div className="flex flex-1 flex-col p-6">
+                          <div className="mb-4 flex items-start justify-between">
+                            <div>
+                              <h3 className="text-xl font-bold text-foreground">
+                                {property.title}
+                              </h3>
+                              <p className="mt-1 flex items-center gap-1 text-muted-foreground">
+                                <MapPin className="h-4 w-4" />
+                                {property.address}
+                              </p>
+                            </div>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="outline"
+                                  size="icon"
+                                  className="border-3 border-foreground bg-transparent"
+                                  aria-label={`Options for ${property.title}`}
+                                >
+                                  <MoreVertical className="h-4 w-4" aria-hidden="true" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent className="border-3 border-foreground">
+                                {property.listingId && (
+                                  <DropdownMenuItem asChild>
+                                    <Link
+                                      href={`/dashboard/landlord/properties/${property.listingId}/applications`}
+                                      className="flex cursor-pointer items-center"
+                                    >
+                                      <Users className="mr-2 h-4 w-4" /> View
+                                      Applications
+                                    </Link>
+                                  </DropdownMenuItem>
+                                )}
+                                <DropdownMenuItem>
+                                  <Edit className="mr-2 h-4 w-4" /> Edit
+                                  Property
+                                </DropdownMenuItem>
+                                <DropdownMenuItem>
+                                  <Eye className="mr-2 h-4 w-4" /> View Listing
+                                </DropdownMenuItem>
+                                <DropdownMenuItem className="text-destructive">
+                                  <Trash2 className="mr-2 h-4 w-4" /> Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
 
-                      <div className="mt-auto flex items-center justify-between">
-                        <div className="flex items-center gap-6">
-                          <p className="text-2xl font-bold text-primary">
-                            ₦{property.price.toLocaleString()}
-                            <span className="text-sm font-normal text-muted-foreground">
-                              /year
+                          <div className="mb-4 flex gap-6">
+                            <span className="flex items-center gap-1 text-sm font-medium">
+                              <Bed className="h-4 w-4" aria-hidden="true" />
+                              {property.bedrooms} Beds
                             </span>
-                          </p>
-                          <div className="flex gap-4 text-sm text-muted-foreground">
-                            <span className="flex items-center gap-1">
-                              <Eye className="h-4 w-4" /> {property.views} views
+                            <span className="flex items-center gap-1 text-sm font-medium">
+                              <Bath className="h-4 w-4" aria-hidden="true" />
+                              {property.bathrooms} Baths
                             </span>
-                            <span className="flex items-center gap-1">
-                              <MessageSquare className="h-4 w-4" />{" "}
-                              {property.inquiries} inquiries
-                            </span>
+                            {property.sqm && (
+                              <span className="flex items-center gap-1 text-sm font-medium">
+                                <Square className="h-4 w-4" aria-hidden="true" />
+                                {property.sqm} sqm
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-auto flex items-center justify-between">
+                            <div className="flex items-center gap-6">
+                              <p className="text-2xl font-bold text-primary">
+                                <MoneyValue
+                                  status="ready"
+                                  amount={property.annualRentNgn}
+                                  format={formatCurrency}
+                                />
+                                <span className="text-sm font-normal text-muted-foreground">
+                                  /year
+                                </span>
+                              </p>
+                              <div className="flex gap-4 text-sm text-muted-foreground">
+                                <span className="flex items-center gap-1">
+                                  <Eye className="h-4 w-4" /> {property.views}{" "}
+                                  views
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <MessageSquare className="h-4 w-4" />{" "}
+                                  {property.inquiries} inquiries
+                                </span>
+                                {pendingCount > 0 && (
+                                  <span className="flex items-center gap-1 font-medium text-destructive">
+                                    <Users className="h-4 w-4" /> {pendingCount}{" "}
+                                    pending
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                </Card>
-                )
-              })}
+                    </Card>
+                  );
+                })
+              )}
             </div>
           )}
         </div>

@@ -1,15 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
-  Home,
   Building2,
-  CreditCard,
-  MessageSquare,
-  Settings,
   Calendar,
   CheckCircle,
+  CreditCard,
   MapPin,
   FileText,
   Download,
@@ -18,26 +15,214 @@ import {
   Mail,
   Clock,
   X,
+  Briefcase,
+  AlertCircle,
+  Loader2,
+  FileSignature,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { DashboardHeader } from "@/components/dashboard-header";
-import { leaseDetails } from "@/lib/mockData/leaseData";
+import { formatDate } from "@/lib/date";
+import { DashboardSidebar } from "@/components/dashboard/DashboardSidebar";
+import { LeaseESignature } from "@/components/properties/LeaseESignature";
 import {
-  leaseAgreement,
-  propertyInspectionReport,
-  paymentSchedule,
-  houseRules,
-} from "@/lib/mockData/documents";
+  searchEmployers,
+  updateDealRepayment,
+  type RepaymentMethod,
+  type EmployerSearchResult,
+} from "@/lib/employersApi";
+import {
+  getTenantCurrentLease,
+  getTenantLeaseDetails,
+  getTenantLeaseDocuments,
+  type TenantLeaseDetails,
+  type TenantLeaseDocument,
+} from "@/lib/tenantApi";
+
+const DEDUCTION_DAYS = Array.from({ length: 28 }, (_, i) => i + 1);
+
+interface DocWithContent extends TenantLeaseDocument {
+  content?: {
+    sections: Array<{
+      title: string;
+      content?: string;
+      items?: string[];
+    }>;
+  };
+}
+
+interface DocPreviewModalProps {
+  doc: DocWithContent;
+  onClose: () => void;
+}
+
+function DocPreviewModal({ doc, onClose }: DocPreviewModalProps) {
+  const titleId = "doc-preview-title";
+  const focusTrapRef = useFocusTrap(true, onClose);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={focusTrapRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="max-h-[90vh] max-w-2xl w-full overflow-y-auto border-3 border-foreground bg-card shadow-[8px_8px_0px_0px_rgba(26,26,26,1)] focus:outline-none"
+      >
+        <div className="sticky top-0 border-b-3 border-foreground bg-card px-6 py-4 flex items-center justify-between">
+          <h2 id={titleId} className="text-xl font-bold">
+            {doc.name}
+          </h2>
+          <button
+            onClick={onClose}
+            aria-label="Close document preview"
+            className="flex h-8 w-8 items-center justify-center border-2 border-foreground bg-muted hover:bg-primary transition-all focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="flex flex-wrap gap-4 text-sm font-bold border-b-2 border-dashed border-foreground pb-4">
+            <div>
+              <p className="text-xs text-muted-foreground">Date</p>
+              <p>{formatDate(doc.date)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Size</p>
+              <p>{doc.size}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Status</p>
+              <span className="capitalize inline-flex items-center gap-1 border-2 border-foreground px-2 py-1 bg-primary">
+                {doc.status}
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <p className="text-muted-foreground">
+              Document preview not available. Please download to view full
+              content.
+            </p>
+          </div>
+
+          <div className="border-t-3 border-foreground pt-4 flex gap-3">
+            <Button
+              className="flex-1 border-2 border-foreground bg-primary py-3 font-bold shadow-[3px_3px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-px hover:translate-y-px hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]"
+              onClick={() => { if (doc.url) window.open(doc.url, "_blank"); }}
+            >
+              <Download className="mr-2 h-4 w-4" aria-hidden="true" />
+              Download PDF
+            </Button>
+            <Button
+              onClick={onClose}
+              className="flex-1 border-2 border-foreground bg-transparent font-bold hover:bg-muted"
+            >
+              Close
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function TenantLeasePage() {
-  const [selectedDocument, setSelectedDocument] = useState<
-    | typeof leaseAgreement
-    | typeof propertyInspectionReport
-    | typeof paymentSchedule
-    | typeof houseRules
-    | null
-  >(null);
+  const [leaseDetails, setLeaseDetails] = useState<TenantLeaseDetails | null>(
+    null,
+  );
+  const [documents, setDocuments] = useState<TenantLeaseDocument[]>([]);
+  const [dealId, setDealId] = useState<string | null>(null);
+  const [isSigningOpen, setIsSigningOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [repaymentMethod, setRepaymentMethod] =
+    useState<RepaymentMethod>("self_pay");
+  const [employerQuery, setEmployerQuery] = useState("");
+  const [employerResults, setEmployerResults] = useState<
+    EmployerSearchResult[]
+  >([]);
+  const [selectedEmployer, setSelectedEmployer] =
+    useState<EmployerSearchResult | null>(null);
+  const [employeeId, setEmployeeId] = useState("");
+  const [deductionDay, setDeductionDay] = useState(25);
+  const [repaymentSaving, setRepaymentSaving] = useState(false);
+  const [repaymentError, setRepaymentError] = useState<string | null>(null);
+  const [repaymentSaved, setRepaymentSaved] = useState(false);
+
+  const [selectedDocument, setSelectedDocument] =
+    useState<DocWithContent | null>(null);
+
+  useEffect(() => {
+    getTenantCurrentLease()
+      .then((res) => {
+        const currentDealId = res.data.dealId;
+        setDealId(currentDealId);
+        return Promise.all([
+          getTenantLeaseDetails(currentDealId),
+          getTenantLeaseDocuments(currentDealId),
+        ]);
+      })
+      .then(([detailsRes, docsRes]) => {
+        setLeaseDetails(detailsRes.data);
+        setDocuments(docsRes.data);
+        setError(null);
+      })
+      .catch((err) => {
+        console.error("Failed to load lease:", err);
+        setError(err instanceof Error ? err.message : "Failed to load lease");
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (
+      repaymentMethod !== "salary_deduction" ||
+      employerQuery.trim().length < 2
+    ) {
+      setEmployerResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      searchEmployers(employerQuery)
+        .then(setEmployerResults)
+        .catch(() => setEmployerResults([]));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [employerQuery, repaymentMethod]);
+
+  const saveRepaymentMethod = useCallback(async () => {
+    if (!dealId) return;
+
+    setRepaymentSaving(true);
+    setRepaymentError(null);
+    setRepaymentSaved(false);
+    try {
+      await updateDealRepayment(dealId, {
+        repaymentMethod,
+        employerId: selectedEmployer?.id,
+        employeeId:
+          repaymentMethod === "salary_deduction" ? employeeId : undefined,
+        deductionDay:
+          repaymentMethod === "salary_deduction" ? deductionDay : undefined,
+      });
+      setRepaymentSaved(true);
+    } catch (err) {
+      setRepaymentError(
+        err instanceof Error ? err.message : "Failed to save repayment method",
+      );
+    } finally {
+      setRepaymentSaving(false);
+    }
+  }, [dealId, repaymentMethod, selectedEmployer, employeeId, deductionDay]);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("en-NG", {
@@ -47,93 +232,67 @@ export default function TenantLeasePage() {
     }).format(amount);
   };
 
-  const progressPercentage =
-    (leaseDetails.paymentProgress.totalPaid /
-      leaseDetails.paymentProgress.totalOwed) *
-    100;
+  const progressPercentage = leaseDetails
+    ? (leaseDetails.paymentProgress.totalPaid /
+        leaseDetails.paymentProgress.totalOwed) *
+      100
+    : 0;
 
-  const getDocumentObject = (docName: string) => {
-    switch (docName) {
-      case "Lease Agreement":
-        return leaseAgreement;
-      case "Property Inspection Report":
-        return propertyInspectionReport;
-      case "Payment Schedule":
-        return paymentSchedule;
-      case "House Rules":
-        return houseRules;
-      default:
-        return null;
-    }
-  };
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background">
+        <DashboardHeader />
+        <DashboardSidebar
+          role="tenant"
+          userInfo={{ name: "Ngozi Adekunle", roleLabel: "Tenant" }}
+        />
+        <main className="lg:ml-64 min-h-screen pt-20">
+          <div className="p-8 flex items-center justify-center">
+            <Loader2 className="h-12 w-12 animate-spin" />
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (error || !leaseDetails || !dealId) {
+    return (
+      <div className="min-h-screen bg-background">
+        <DashboardHeader />
+        <DashboardSidebar
+          role="tenant"
+          userInfo={{ name: "Ngozi Adekunle", roleLabel: "Tenant" }}
+        />
+        <main className="lg:ml-64 min-h-screen pt-20">
+          <div className="p-8">
+            <Card className="border-3 border-foreground bg-destructive/10 p-6">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 shrink-0 text-destructive" />
+                <div>
+                  <p className="font-bold">No active lease</p>
+                  <p className="text-sm text-muted-foreground">
+                    {error || "You don't have an active lease at the moment"}
+                  </p>
+                </div>
+              </div>
+            </Card>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
       <DashboardHeader />
 
-      {/* Sidebar */}
-      <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r-3 border-foreground bg-card pt-20">
-        <div className="flex h-full flex-col px-4 py-6">
-          <div className="mb-8 border-3 border-foreground bg-secondary p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <p className="text-sm font-medium text-foreground">Logged in as</p>
-            <p className="text-lg font-bold text-foreground">Ngozi Adekunle</p>
-            <p className="text-sm text-muted-foreground">Tenant</p>
-          </div>
+      <DashboardSidebar
+        role="tenant"
+        userInfo={{ name: "Ngozi Adekunle", roleLabel: "Tenant" }}
+      />
 
-          <nav className="flex-1 space-y-2">
-            <Link
-              href="/dashboard/tenant"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Home className="h-5 w-5" />
-              Dashboard
-            </Link>
-            <Link
-              href="/dashboard/tenant/payments"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <CreditCard className="h-5 w-5" />
-              Payments
-            </Link>
-            <Link
-              href="/dashboard/tenant/lease"
-              className="flex items-center gap-3 border-3 border-foreground bg-primary p-3 font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <FileText className="h-5 w-5" />
-              My Lease
-            </Link>
-            <Link
-              href="/properties"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Building2 className="h-5 w-5" />
-              Browse Properties
-            </Link>
-            <Link
-              href="/messages"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <MessageSquare className="h-5 w-5" />
-              Messages
-              <span className="ml-auto flex h-6 w-6 items-center justify-center border-2 border-foreground bg-destructive text-xs font-bold text-destructive-foreground">
-                2
-              </span>
-            </Link>
-            <Link
-              href="/dashboard/tenant/settings"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Settings className="h-5 w-5" />
-              Settings
-            </Link>
-          </nav>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="ml-64 min-h-screen pt-20">
+      <main className="lg:ml-64 min-h-screen pt-20">
         <div className="p-8">
-          {/* Header */}
           <div className="mb-8 flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold text-foreground">My Lease</h1>
@@ -141,14 +300,22 @@ export default function TenantLeasePage() {
                 View your lease details and documents
               </p>
             </div>
-            <div className="flex items-center gap-2 border-3 border-foreground bg-secondary px-4 py-2 font-bold">
-              <CheckCircle className="h-5 w-5" />
-              Active Lease
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={() => setIsSigningOpen(true)}
+                className="border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+              >
+                <FileSignature className="mr-2 h-5 w-5" />
+                Sign Lease Agreement
+              </Button>
+              <div className="flex items-center gap-2 border-3 border-foreground bg-secondary px-4 py-2 font-bold">
+                <CheckCircle className="h-5 w-5" />
+                Active Lease
+              </div>
             </div>
           </div>
 
           <div className="grid gap-6 lg:grid-cols-3">
-            {/* Property Details */}
             <div className="lg:col-span-2 space-y-6">
               <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
                 <h3 className="mb-4 text-lg font-bold">Property Details</h3>
@@ -177,7 +344,6 @@ export default function TenantLeasePage() {
                 </div>
               </Card>
 
-              {/* Lease Terms */}
               <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
                 <h3 className="mb-4 text-lg font-bold">Lease Terms</h3>
                 <div className="grid gap-4 md:grid-cols-2">
@@ -187,7 +353,7 @@ export default function TenantLeasePage() {
                       <span className="text-sm">Start Date</span>
                     </div>
                     <p className="mt-1 font-bold">
-                      {leaseDetails.lease.startDate}
+                      {formatDate(leaseDetails.lease.startDate)}
                     </p>
                   </div>
                   <div className="border-3 border-foreground bg-muted/50 p-4">
@@ -196,7 +362,7 @@ export default function TenantLeasePage() {
                       <span className="text-sm">End Date</span>
                     </div>
                     <p className="mt-1 font-bold">
-                      {leaseDetails.lease.endDate}
+                      {formatDate(leaseDetails.lease.endDate)}
                     </p>
                   </div>
                   <div className="border-3 border-foreground bg-muted/50 p-4">
@@ -248,11 +414,158 @@ export default function TenantLeasePage() {
                 </div>
               </Card>
 
-              {/* Documents */}
+              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
+                <h3 className="mb-4 flex items-center gap-2 text-lg font-bold">
+                  <Briefcase className="h-5 w-5" />
+                  Repayment Method
+                </h3>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRepaymentMethod("self_pay")}
+                    className={`border-3 border-foreground px-4 py-2 font-bold transition-all ${
+                      repaymentMethod === "self_pay"
+                        ? "bg-primary shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    Pay myself
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRepaymentMethod("salary_deduction")}
+                    className={`border-3 border-foreground px-4 py-2 font-bold transition-all ${
+                      repaymentMethod === "salary_deduction"
+                        ? "bg-primary shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    Salary deduction
+                  </button>
+                </div>
+
+                {repaymentMethod === "salary_deduction" && (
+                  <div className="mt-6 space-y-4">
+                    <div>
+                      <label
+                        htmlFor="employer-search"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Employer
+                      </label>
+                      <input
+                        id="employer-search"
+                        type="text"
+                        value={employerQuery}
+                        onChange={(e) => {
+                          setEmployerQuery(e.target.value);
+                          setSelectedEmployer(null);
+                        }}
+                        placeholder="Search by company name"
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-medium"
+                      />
+                      {employerResults.length > 0 && !selectedEmployer && (
+                        <ul className="mt-2 border-3 border-foreground bg-card">
+                          {employerResults.map((emp) => (
+                            <li key={emp.id}>
+                              <button
+                                type="button"
+                                className="w-full px-3 py-2 text-left font-bold hover:bg-muted"
+                                onClick={() => {
+                                  setSelectedEmployer(emp);
+                                  setEmployerQuery(emp.name);
+                                  setEmployerResults([]);
+                                }}
+                              >
+                                {emp.name}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="employee-id"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Employee ID (payroll)
+                      </label>
+                      <input
+                        id="employee-id"
+                        type="text"
+                        value={employeeId}
+                        onChange={(e) => setEmployeeId(e.target.value)}
+                        placeholder="Your ID at this employer"
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="deduction-day"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Deduction day of month
+                      </label>
+                      <select
+                        id="deduction-day"
+                        value={deductionDay}
+                        onChange={(e) =>
+                          setDeductionDay(Number(e.target.value))
+                        }
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-bold"
+                      >
+                        {DEDUCTION_DAYS.map((day) => (
+                          <option key={day} value={day}>
+                            Day {day}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="border-l-4 border-primary pl-3 text-sm text-muted-foreground">
+                      Your employer will be notified to deduct{" "}
+                      <span className="font-bold text-foreground">
+                        {formatCurrency(leaseDetails.lease.monthlyPayment)}
+                      </span>{" "}
+                      on day{" "}
+                      <span className="font-bold text-foreground">
+                        {deductionDay}
+                      </span>{" "}
+                      of each month.
+                    </p>
+                  </div>
+                )}
+
+                {repaymentError && (
+                  <p className="mt-4 flex items-center gap-2 text-sm font-bold text-destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    {repaymentError}
+                  </p>
+                )}
+                {repaymentSaved && (
+                  <p className="mt-4 flex items-center gap-2 text-sm font-bold text-primary">
+                    <CheckCircle className="h-4 w-4" />
+                    Repayment preferences saved.
+                  </p>
+                )}
+
+                <Button
+                  className="mt-4 border-2 border-foreground bg-secondary font-bold shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                  disabled={
+                    repaymentSaving ||
+                    (repaymentMethod === "salary_deduction" &&
+                      (!selectedEmployer || !employeeId.trim()))
+                  }
+                  onClick={() => void saveRepaymentMethod()}
+                >
+                  {repaymentSaving ? "Saving…" : "Save repayment method"}
+                </Button>
+              </Card>
+
               <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
                 <h3 className="mb-4 text-lg font-bold">Lease Documents</h3>
                 <div className="space-y-3">
-                  {leaseDetails.documents.map((doc) => (
+                  {documents.map((doc) => (
                     <div
                       key={doc.id}
                       className="flex w-full items-center justify-between border-3 border-foreground bg-card p-4 text-left transition-all hover:bg-muted"
@@ -260,9 +573,8 @@ export default function TenantLeasePage() {
                       <button
                         type="button"
                         className="flex flex-1 items-center gap-4 text-left"
-                        onClick={() =>
-                          setSelectedDocument(getDocumentObject(doc.name))
-                        }
+                        onClick={() => setSelectedDocument(doc)}
+                        aria-label={`View details for ${doc.name}`}
                       >
                         <div className="flex h-10 w-10 items-center justify-center border-2 border-foreground bg-muted shrink-0">
                           <FileText className="h-5 w-5" />
@@ -270,159 +582,44 @@ export default function TenantLeasePage() {
                         <div className="flex-1">
                           <p className="font-bold">{doc.name}</p>
                           <p className="text-xs text-muted-foreground">
-                            {doc.date} · {doc.size} · {doc.status}
+                            {formatDate(doc.date)} ·{" "}
+                            {doc.size} · {doc.status}
                           </p>
                         </div>
                       </button>
                       <Button
                         className="border-2 border-foreground bg-primary px-4 py-2 font-bold shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-px hover:translate-y-px hover:shadow-[1px_1px_0px_0px_rgba(26,26,26,1)]"
-                        onClick={() =>
-                          setSelectedDocument(getDocumentObject(doc.name))
-                        }
+                        onClick={() => {
+                          if (doc.url) {
+                            window.open(doc.url, "_blank");
+                          }
+                        }}
                       >
-                        <FileText className="mr-2 h-4 w-4" />
-                        View
+                        <Download className="mr-2 h-4 w-4" />
+                        Download
                       </Button>
                     </div>
                   ))}
                 </div>
               </Card>
 
-              {/* Document Viewer Modal */}
               {selectedDocument && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                  <div className="max-h-[90vh] max-w-2xl w-full overflow-y-auto border-3 border-foreground bg-card shadow-[8px_8px_0px_0px_rgba(26,26,26,1)]">
-                    {/* Modal Header */}
-                    <div className="sticky top-0 border-b-3 border-foreground bg-card px-6 py-4 flex items-center justify-between">
-                      <h2 className="text-xl font-bold">
-                        {selectedDocument.title}
-                      </h2>
-                      <button
-                        onClick={() => setSelectedDocument(null)}
-                        className="flex h-8 w-8 items-center justify-center border-2 border-foreground bg-muted hover:bg-primary transition-all"
-                      >
-                        <X className="h-5 w-5" />
-                      </button>
-                    </div>
-
-                    {/* Modal Content */}
-                    <div className="p-6 space-y-6">
-                      {/* Document Info */}
-                      <div className="flex flex-wrap gap-4 text-sm font-bold border-b-2 border-dashed border-foreground pb-4">
-                        <div>
-                          <p className="text-xs text-muted-foreground">Date</p>
-                          <p>{selectedDocument.date}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Size</p>
-                          <p>{selectedDocument.size}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">
-                            Status
-                          </p>
-                          <span className="capitalize inline-flex items-center gap-1 border-2 border-foreground px-2 py-1 bg-primary">
-                            {selectedDocument.status}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Document Sections */}
-                      <div className="space-y-6">
-                        {selectedDocument.content.sections.map(
-                          (section) => (
-                            <div
-                              key={section.title}
-                              className="border-l-4 border-primary pl-4"
-                            >
-                              <h3 className="font-bold text-lg mb-2">
-                                {section.title}
-                              </h3>
-                              {"content" in section && section.content && (
-                                <p className="text-sm text-muted-foreground leading-relaxed mb-3">
-                                  {section.content}
-                                </p>
-                              )}
-                              {"items" in section && section.items && (
-                                <ul className="space-y-2">
-                                  {section.items.map((item) => (
-                                    <li
-                                      key={`${section.title}:${item}`}
-                                      className="flex gap-3 text-sm text-muted-foreground"
-                                    >
-                                      <span className="font-bold text-primary">
-                                        •
-                                      </span>
-                                      <span>{item}</span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          ),
-                        )}
-                      </div>
-
-                      {/* Modal Footer */}
-                      <div className="border-t-3 border-foreground pt-4 flex gap-3">
-                        <Button className="flex-1 border-2 border-foreground bg-primary py-3 font-bold shadow-[3px_3px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-px hover:translate-y-px hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
-                          <Download className="mr-2 h-4 w-4" />
-                          Download PDF
-                        </Button>
-                        <Button
-                          onClick={() => setSelectedDocument(null)}
-                          className="flex-1 border-2 border-foreground bg-transparent font-bold hover:bg-muted"
-                        >
-                          Close
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <DocPreviewModal
+                  doc={selectedDocument}
+                  onClose={() => setSelectedDocument(null)}
+                />
               )}
+
+              <LeaseESignature
+                propertyId={dealId}
+                propertyName={leaseDetails.property.title}
+                dealId={dealId}
+                isOpen={isSigningOpen}
+                onClose={() => setIsSigningOpen(false)}
+              />
             </div>
 
-            {/* Contact Cards */}
             <div className="space-y-6">
-              {/* Agent */}
-              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                <h3 className="mb-4 text-lg font-bold">Your Agent</h3>
-                <div className="mb-4 flex items-center gap-4">
-                  <div className="flex h-16 w-16 items-center justify-center border-3 border-foreground bg-accent text-xl font-bold">
-                    AJ
-                  </div>
-                  <div>
-                    <p className="font-bold">{leaseDetails.agent.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      Property Agent
-                    </p>
-                    <div className="mt-1 flex items-center gap-1">
-                      <span className="text-sm font-bold">
-                        {leaseDetails.agent.rating}
-                      </span>
-                      <span className="text-accent">★</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-2 border-t-2 border-foreground pt-4">
-                  <div className="flex items-center gap-2 text-sm">
-                    <Phone className="h-4 w-4 text-muted-foreground" />
-                    <span>{leaseDetails.agent.phone}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <Mail className="h-4 w-4 text-muted-foreground" />
-                    <span>{leaseDetails.agent.email}</span>
-                  </div>
-                </div>
-                <Link href="/messages">
-                  <Button className="mt-4 w-full border-3 border-foreground bg-secondary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                    <MessageSquare className="mr-2 h-4 w-4" />
-                    Message Agent
-                  </Button>
-                </Link>
-              </Card>
-
-              {/* Landlord */}
               <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
                 <h3 className="mb-4 text-lg font-bold">Landlord</h3>
                 <div className="mb-4 flex items-center gap-4">
@@ -431,9 +628,11 @@ export default function TenantLeasePage() {
                   </div>
                   <div>
                     <p className="font-bold">{leaseDetails.landlord.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {leaseDetails.landlord.company}
-                    </p>
+                    {leaseDetails.landlord.company && (
+                      <p className="text-sm text-muted-foreground">
+                        {leaseDetails.landlord.company}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="space-y-2 border-t-2 border-foreground pt-4">
@@ -448,7 +647,6 @@ export default function TenantLeasePage() {
                 </div>
               </Card>
 
-              {/* Need Help */}
               <Card className="border-3 border-foreground bg-accent/30 p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
                 <h3 className="mb-2 font-bold">Need Help?</h3>
                 <p className="mb-4 text-sm text-muted-foreground">

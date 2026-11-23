@@ -9,12 +9,60 @@ This folder contains Soroban smart contracts written in Rust.
 
 ## Workspace
 
-- `rent_wallet/` - Minimal reference contract for wallet-like credit/debit flows
+The contracts directory is a Cargo workspace. Each subdirectory is a separate contract crate:
+
+| Contract | Purpose |
+|---|---|
+| `rent_wallet/` | Custodial wallet for credit/debit flows (tenant rent balances) |
+| `rent_payments/` | Deal receipts and paginated payment history |
+| `deal_escrow/` | Escrow logic holding funds until deal conditions are met |
+| `staking_pool/` | Staking pool for platform liquidity providers |
+| `mvp_staking_pool/` | Minimal staking pool reference implementation |
+| `staking_rewards/` | Reward distribution for stakers |
+| `timelock/` | Time-locked governance actions |
+| `transaction-receipt-contract/` | On-chain transaction receipts with canonical tx_id |
+| `whistleblower_rewards/` | Reward allocation and claiming for whistleblowers who report fraudulent listings |
+| `upgradeable_proxy/` | Proxy pattern for contract upgrades |
+| `soroban_access_control/` | Shared access-control primitives |
+| `soroban_pausable/` | Shared pausable primitive used across contracts |
+| `contract_access/` | Contract-level access helpers |
+
+## Formal Verification
+
+The `staking_pool` contract includes Kani proof harnesses in
+`staking_pool/src/formal_properties.rs` that verify safety properties such as
+overflow/underflow protection, lock-period enforcement, balance conservation,
+reentrancy guarding, and upgrade timelock compliance.
+
+### Prerequisites
+
+- [Rust nightly](https://rust-lang.github.io/rustup/concepts/channels.html):
+  `rustup install nightly`
+- [Kani Rust Verifier](https://github.com/model-checking/kani):
+  `cargo install --locked kani-verifier && cargo kani setup`
+
+### Run proofs locally
+
+```bash
+cd contracts
+make kani-staking-pool
+# or:
+cargo kani --package staking_pool
+```
+
+Kani verification also runs in CI on push to `main` (when staking_pool changes)
+and on a weekly schedule (see `.github/workflows/kani.yml`).
 
 ## Build & test
 
 ```bash
 cd contracts
+
+# Formatting
+cargo fmt
+
+# Linting
+cargo clippy --all-targets --all-features -- -D warnings
 
 # 1) Run unit tests
 cargo test
@@ -74,6 +122,184 @@ Recommended contributor expectations for deployment-related issues:
 
 - `init(admin: Address)`
 - `credit(user: Address, amount: i128)` (admin-auth)
+- `credit_as_operator(user: Address, amount: i128)` (operator-auth)
 - `debit(user: Address, amount: i128)` (admin-auth)
 - `balance(user: Address) -> i128`
 - `set_admin(new_admin: Address)` (admin-auth)
+- `pause()` (admin-auth)
+- `unpause()` (admin-auth)
+- `is_paused() -> bool`
+- `add_operator(operator: Address)` (admin-auth)
+- `remove_operator(operator: Address)` (admin-auth)
+- `is_operator(operator: Address) -> bool`
+
+### Events
+
+The `rent_wallet` contract emits Soroban events to support indexing and auditability.
+
+- **`credit`**
+  - **Topic**
+    - `("credit", user: Address)`
+  - **Data**
+    - `(amount: i128, new_balance: i128)`
+
+- **`debit`**
+  - **Topic**
+    - `("debit", user: Address)`
+  - **Data**
+    - `(amount: i128, new_balance: i128)`
+
+For both events:
+
+- **`user`** is the address whose balance was modified.
+- **`amount`** is the delta applied (always positive).
+- **`new_balance`** is the resulting balance after applying the delta.
+
+- **`pause`**
+  - **Topic**
+    - `("pause",)`
+  - **Data**
+    - `()`
+  - Emitted when the contract is paused by the admin.
+
+- **`unpause`**
+  - **Topic**
+    - `("unpause",)`
+  - **Data**
+    - `()`
+  - Emitted when the contract is unpaused by the admin.
+
+- **`add_operator`**
+  - **Topic**
+    - `("add_operator",)`
+  - **Data**
+    - `(operator: Address)`
+  - Emitted when an operator is added by the admin.
+
+- **`remove_operator`**
+  - **Topic**
+    - `("remove_operator",)`
+  - **Data**
+    - `(operator: Address)`
+  - Emitted when an operator is removed by the admin.
+
+### Pause Functionality
+
+The contract includes a pause mechanism for emergency stops:
+
+- **`pause()`**: Pauses the contract. Only the admin can call this function.
+- **`unpause()`**: Unpauses the contract. Only the admin can call this function.
+- **`is_paused()`**: Returns `true` if the contract is paused, `false` otherwise.
+
+**Behavior when paused:**
+- `credit()` and `debit()` operations will fail with a panic if called while the contract is paused.
+- `balance()` and other read-only operations continue to work normally when paused.
+- Only the admin can pause or unpause the contract.
+
+### Operator Role Model
+
+The contract implements a role-based access control system with three roles:
+
+#### Roles
+- **Admin**: Has full control over the contract, including operator management.
+- **Operator**: Can perform credit operations only (cannot debit or manage other operators).
+- **User**: Any address that can have a balance but has no special permissions.
+
+#### Operator Management
+- **`add_operator(operator: Address)`**: Adds a new operator. Only the admin can call this function.
+- **`remove_operator(operator: Address)`**: Removes an existing operator. Only the admin can call this function.
+- **`is_operator(operator: Address) -> bool`**: Returns `true` if the address is an operator, `false` otherwise.
+
+#### Permission Matrix
+| Function | Admin | Operator | User |
+|----------|-------|----------|------|
+| `credit()` | ✅ | ❌ | ❌ |
+| `credit_as_operator()` | ❌ | ✅ | ❌ |
+| `debit()` | ✅ | ❌ | ❌ |
+| `add_operator()` | ✅ | ❌ | ❌ |
+| `remove_operator()` | ✅ | ❌ | ❌ |
+| `set_admin()` | ✅ | ❌ | ❌ |
+| `pause()` | ✅ | ❌ | ❌ |
+| `unpause()` | ✅ | ❌ | ❌ |
+| `balance()` | ✅ | ✅ | ✅ |
+| `is_paused()` | ✅ | ✅ | ✅ |
+| `is_operator()` | ✅ | ✅ | ✅ |
+
+#### Use Case
+The operator role is designed for delegation scenarios where a property manager or similar role needs to credit tenant accounts (e.g., for security deposits or rent payments) without having full administrative control over the contract.
+
+### `deal_escrow`
+
+The `deal_escrow` contract securely holds tokens until a deal is finalized. Full-payments are routed with split rewards upon release.
+
+- `init(admin: Address, operator: Address, token: Address, receipt_contract: Address)`
+- `deposit(from: Address, deal_id: String, amount: i128)` (auth via `from`)
+- `release(caller: Address, deal_id: String, to: Address, principal_amount: i128, platform_addr: Address, platform_amount: i128, reporter_addr: Address, reporter_amount: i128, external_ref_source: Symbol, external_ref: String)` (auth via `admin` or `operator`) -> `i128`
+- `balance(deal_id: String) -> i128`
+- `pause()` (admin-auth)
+- `unpause()` (admin-auth)
+- `is_paused() -> bool`
+
+#### Events
+
+- **`deposit`**
+  - **Topic**: `("deal_escrow", "deposit")`
+  - **Data**: `(deal_id: String, from: Address, amount: i128)`
+- **`release`**
+  - **Topic**: `("deal_escrow", "release")`
+  - **Data**: `(deal_id: String, to: Address, principal_amount: i128, platform_addr: Address, platform_amount: i128, reporter_addr: Address, reporter_amount: i128, external_ref_source: Symbol, tx_id: BytesN<32>)`
+
+### `rent_payments`
+
+- `init(admin: Address)`
+- `create_receipt(deal_id: DealId, amount: i128, payer: Address) -> Receipt` (admin-auth)
+- `list_receipts_by_deal(deal_id: DealId, limit: u32, cursor: Option<Cursor>) -> ReceiptPage`
+- `receipt_count(deal_id: DealId) -> u64`
+
+#### Cursor-Based Pagination
+
+The `list_receipts_by_deal` function implements cursor-based pagination for efficient retrieval of receipts.
+
+**Cursor Format:**
+- The cursor is a struct containing:
+  - `timestamp: Timestamp` (u64) - The timestamp of the last receipt in the previous page
+  - `tx_id: TxId` (BytesN<32>) - The transaction ID of the last receipt in the previous page
+
+**Ordering:**
+Receipts are ordered by a stable, deterministic ordering:
+1. Primary: `timestamp` (ascending)
+2. Secondary: `tx_id` (ascending, byte-wise comparison)
+
+This ensures:
+- Consistent pagination results even if multiple receipts share the same timestamp
+- No skipping or duplication of receipts across pages
+- Deterministic ordering that remains stable over time
+
+**Usage:**
+- First page: Pass `None` as the cursor
+- Subsequent pages: Use `next_cursor` from the previous `ReceiptPage`
+- Check `has_next` to determine if more pages are available
+
+**Example:**
+```rust
+// First page
+let page1 = client.list_receipts_by_deal(&deal_id, &10u32, &None);
+
+// Next page (if available)
+if page1.has_next {
+    let page2 = client.list_receipts_by_deal(&deal_id, &10u32, &Some(page1.next_cursor));
+}
+```
+
+**Limits:**
+- `limit` must be between 1 and 100 (inclusive)
+- The function will panic if an invalid limit is provided
+
+#### Events
+
+- **`receipt_created`**
+  - **Topic**
+    - `("receipt_created", deal_id: DealId)`
+  - **Data**
+    - `(receipt_id: ReceiptId, amount: i128, payer: Address)`
+  - Emitted when a new receipt is created for a deal.

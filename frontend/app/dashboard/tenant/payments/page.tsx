@@ -1,399 +1,480 @@
 "use client"
 
-import { useState } from "react"
-import Link from "next/link"
+import { useEffect, useState } from "react"
 import {
-  Home,
-  Building2,
-  CreditCard,
-  MessageSquare,
-  Settings,
   Calendar,
-  Clock,
-  CheckCircle,
   AlertCircle,
-  FileText,
   Wallet,
-  Plus,
+  Loader2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { DashboardHeader } from "@/components/dashboard-header"
+import { DashboardSidebar } from "@/components/dashboard/DashboardSidebar"
 import {
-  tenantPastPayments as pastPayments,
-  tenantPaymentSchedule as paymentSchedule,
-  tenantWalletData as walletData,
-} from "@/lib/mockData"
+  getPaymentSchedule,
+  getWalletBalance,
+  getMyDisputes,
+  initiateQuickPay,
+  type PaymentScheduleItem,
+  type TenantDeal,
+  type PaymentDispute,
+} from "@/lib/tenantApi"
+import { showErrorToast, showSuccessToast } from "@/lib/toast"
+import { usePaymentHistory } from "@/hooks/usePaymentHistory"
+import { PaymentTimeline } from "@/components/payment/PaymentTimeline"
+import { UpcomingScheduleTable } from "@/components/payment/UpcomingScheduleTable"
+import { DisputeDialog } from "@/components/payment/DisputeDialog"
+import { DisputeStatusTimeline } from "@/components/payment/DisputeStatusTimeline"
+import { FullPaymentModal } from "@/components/payment/FullPaymentModal"
+import type { FullPaymentReceipt } from "@/lib/paymentApi"
+import { canFileDispute } from "@/lib/disputeTimeline"
+import { formatNgn } from "@/lib/currency"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import type { PaymentHistoryItem } from "@/lib/tenantApi"
+import { summarizePayments } from "@/lib/installmentSchedule"
+import type { InstalmentInput } from "@/lib/installmentSchedule"
 
-// Wallet balance - checked first before auto-deduction
-// (mock data lives in lib/mockData)
+type ActiveTab = "schedule" | "history"
 
 export default function TenantPaymentsPage() {
-  const [activeTab, setActiveTab] = useState<"upcoming" | "history" | "wallet">("upcoming")
-  const [topUpAmount, setTopUpAmount] = useState("")
-  const [walletBalance, setWalletBalance] = useState(walletData.balance)
+  const [activeTab, setActiveTab] = useState<ActiveTab>("schedule")
+  const [walletBalance, setWalletBalance] = useState(0)
+  const [paymentSchedule, setPaymentSchedule] = useState<PaymentScheduleItem[]>([])
+  const [nextPayment, setNextPayment] = useState<PaymentScheduleItem | null>(null)
+  const [deals, setDeals] = useState<TenantDeal[]>([])
+  const [selectedDeal, setSelectedDeal] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [submittingPeriod, setSubmittingPeriod] = useState<number | null>(null)
+  const [optimisticStatuses, setOptimisticStatuses] = useState<Record<number, "pending" | "failed">>({})
+  const [disputes, setDisputes] = useState<PaymentDispute[]>([])
+  const [disputeDialogPayment, setDisputeDialogPayment] = useState<PaymentHistoryItem | null>(null)
+  const [viewDispute, setViewDispute] = useState<PaymentDispute | null>(null)
+  const [fullPaymentModalOpen, setFullPaymentModalOpen] = useState(false)
+  const [paymentSummary, setPaymentSummary] = useState<ReturnType<typeof summarizePayments> | null>(null)
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat("en-NG", {
-      style: "currency",
-      currency: "NGN",
-      minimumFractionDigits: 0,
-    }).format(amount)
+  const {
+    payments,
+    loadMore,
+    hasMore,
+    isLoading: isHistoryLoading,
+  } = usePaymentHistory({
+    dealId: selectedDeal,
+    limit: 10,
+  })
+
+  const loadData = async () => {
+    setIsLoading(true)
+    try {
+      const [scheduleRes, walletRes, disputesRes] = await Promise.all([
+        getPaymentSchedule(),
+        getWalletBalance(),
+        getMyDisputes(),
+      ])
+
+      if (scheduleRes.success) {
+        setPaymentSchedule(scheduleRes.data.schedule)
+        setNextPayment(scheduleRes.data.nextPayment)
+        setDeals(scheduleRes.data.deals ?? [])
+        setSelectedDeal(
+          scheduleRes.data.dealId || scheduleRes.data.deals?.[0]?.dealId || null,
+        )
+
+        const instalments: InstalmentInput[] = scheduleRes.data.schedule.map(
+          (item: PaymentScheduleItem) => ({
+            period: item.period,
+            dueDate: item.dueDate,
+            amountNgn: item.amount,
+            paid: item.status === "paid",
+          })
+        )
+        const summary = summarizePayments(instalments)
+        setPaymentSummary(summary)
+      }
+
+      if (walletRes.success) {
+        setWalletBalance(walletRes.data.balance)
+      }
+
+      if (disputesRes.success) {
+        setDisputes(disputesRes.data.disputes)
+      }
+    } catch (error: any) {
+      showErrorToast(error?.message || "Failed to load payment data")
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  const nextPayment = paymentSchedule.find((p) => p.status === "upcoming")
+  useEffect(() => {
+    void loadData()
+  }, [])
+
+  const handleQuickPay = async (method: "wallet" | "card") => {
+    if (!selectedDeal || !nextPayment) {
+      showErrorToast("No active payment found")
+      return
+    }
+    if (submittingPeriod !== null) return
+
+    const period = nextPayment.period
+    const idempotencyKey = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`
+
+    setSubmittingPeriod(period)
+    setIsProcessing(true)
+    setOptimisticStatuses((prev) => ({ ...prev, [period]: "pending" }))
+
+    try {
+      const response = await initiateQuickPay({
+        dealId: selectedDeal,
+        amount: nextPayment.amount,
+        paymentMethod: method,
+        idempotencyKey,
+      })
+
+      if (response.success) {
+        if (response.data.redirectUrl) {
+          window.location.href = response.data.redirectUrl
+        } else {
+          showSuccessToast(response.data.message)
+          setOptimisticStatuses((prev) => {
+            const next = { ...prev }
+            delete next[period]
+            return next
+          })
+          await loadData()
+        }
+      }
+    } catch (error: any) {
+      setOptimisticStatuses((prev) => ({ ...prev, [period]: "failed" }))
+      showErrorToast(error?.message || "Payment failed")
+      setTimeout(() => {
+        setOptimisticStatuses((prev) => {
+          const next = { ...prev }
+          delete next[period]
+          return next
+        })
+      }, 5000)
+    } finally {
+      setIsProcessing(false)
+      setSubmittingPeriod(null)
+    }
+  }
+
+  const handleReceiptDownload = (reference: string) => {
+    window.open(`/api/v1/tenant/payments/receipt/${reference}`, "_blank")
+  }
+
+  const disputeStatusByPayment: Record<string, PaymentDispute["status"] | null> = {}
+  for (const dispute of disputes) {
+    disputeStatusByPayment[dispute.paymentId] = dispute.status
+  }
+
+  const handleReportProblem = (paymentId: string) => {
+    const payment = payments.find((p) => p.id === paymentId)
+    if (!payment) return
+    if (!canFileDispute(disputes, paymentId)) {
+      showErrorToast("You already have an open dispute for this payment.")
+      return
+    }
+    setDisputeDialogPayment(payment)
+  }
+
+  const handleViewDispute = (paymentId: string) => {
+    const dispute = disputes.find((d) => d.paymentId === paymentId)
+    if (dispute) setViewDispute(dispute)
+  }
+
+  const handleDisputeFiled = () => {
+    void loadData()
+  }
+
+  const handleFullPaymentSuccess = (receipt: FullPaymentReceipt) => {
+    showSuccessToast(`Full payment confirmed (ref ${receipt.reference})`)
+    void loadData()
+  }
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background">
+        <DashboardHeader />
+        <main className="ml-64 min-h-screen pt-20 flex items-center justify-center">
+          <div
+            aria-live="polite"
+            aria-busy="true"
+            className="flex flex-col items-center gap-4 rounded-3xl border-3 border-foreground bg-card p-10 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+          >
+            <Loader2 className="h-10 w-10 animate-spin text-foreground" aria-hidden="true" />
+            <p className="text-sm font-bold text-foreground">Loading payment details...</p>
+          </div>
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-background">
       <DashboardHeader />
 
-      {/* Sidebar */}
-      <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r-3 border-foreground bg-card pt-20">
-        <div className="flex h-full flex-col px-4 py-6">
-          <div className="mb-8 border-3 border-foreground bg-secondary p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <p className="text-sm font-medium text-foreground">Logged in as</p>
-            <p className="text-lg font-bold text-foreground">Ngozi Adekunle</p>
-            <p className="text-sm text-muted-foreground">Tenant</p>
-          </div>
+      <DashboardSidebar
+        role="tenant"
+        userInfo={{ name: "Ngozi Adekunle", roleLabel: "Tenant" }}
+      />
 
-          <nav className="flex-1 space-y-2">
-            <Link
-              href="/dashboard/tenant"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Home className="h-5 w-5" />
-              Dashboard
-            </Link>
-            <Link
-              href="/dashboard/tenant/payments"
-              className="flex items-center gap-3 border-3 border-foreground bg-primary p-3 font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <CreditCard className="h-5 w-5" />
-              Payments
-            </Link>
-            <Link
-              href="/dashboard/tenant/lease"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <FileText className="h-5 w-5" />
-              My Lease
-            </Link>
-            <Link
-              href="/properties"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Building2 className="h-5 w-5" />
-              Browse Properties
-            </Link>
-            <Link
-              href="/messages"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <MessageSquare className="h-5 w-5" />
-              Messages
-              <span className="ml-auto flex h-6 w-6 items-center justify-center border-2 border-foreground bg-destructive text-xs font-bold text-destructive-foreground">
-                2
-              </span>
-            </Link>
-            <Link
-              href="/dashboard/tenant/settings"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Settings className="h-5 w-5" />
-              Settings
-            </Link>
-          </nav>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="ml-64 min-h-screen pt-20">
+      <main className="lg:ml-64 min-h-screen pt-20">
         <div className="p-8">
-          {/* Header */}
           <div className="mb-8">
             <h1 className="text-3xl font-bold text-foreground">Payments</h1>
-            <p className="mt-1 text-muted-foreground">Manage your rent payments and wallet balance</p>
+            <p className="mt-1 text-muted-foreground">Manage your rent payments and wallet</p>
           </div>
 
           {/* Quick Stats */}
           <div className="mb-8 grid grid-cols-3 gap-4">
             <Card className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-primary">
+                <div
+                  className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-primary"
+                  aria-hidden="true"
+                >
                   <Wallet className="h-6 w-6" />
                 </div>
                 <div>
                   <p className="text-sm text-muted-foreground">Wallet Balance</p>
-                  <p className="text-xl font-bold">{formatCurrency(walletBalance)}</p>
+                  <p className="text-xl font-bold">{formatNgn(walletBalance)}</p>
                 </div>
               </div>
             </Card>
             <Card className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-secondary">
+                <div
+                  className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-secondary"
+                  aria-hidden="true"
+                >
                   <AlertCircle className="h-6 w-6" />
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Next Payment</p>
-                  <p className="text-xl font-bold">{nextPayment ? formatCurrency(nextPayment.amount) : "N/A"}</p>
+                  <p className="text-sm text-muted-foreground">Outstanding</p>
+                  <p className="text-xl font-bold">
+                    {paymentSummary ? formatNgn(paymentSummary.outstanding) : "N/A"}
+                  </p>
                 </div>
               </div>
             </Card>
             <Card className="border-3 border-foreground p-4 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-accent">
+                <div
+                  className="flex h-12 w-12 items-center justify-center border-3 border-foreground bg-accent"
+                  aria-hidden="true"
+                >
                   <Calendar className="h-6 w-6" />
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Due Date</p>
-                  <p className="text-xl font-bold">{nextPayment ? nextPayment.dueDate : "N/A"}</p>
+                  <p className="text-sm text-muted-foreground">Progress</p>
+                  <p className="text-xl font-bold">
+                    {paymentSummary ? `${paymentSummary.progressPercent}%` : "N/A"}
+                  </p>
                 </div>
               </div>
             </Card>
           </div>
 
           {/* Tabs */}
-          <div className="mb-6 flex gap-4">
-            {[
-              { id: "upcoming", label: "Upcoming Payments" },
-              { id: "history", label: "Payment History" },
-              { id: "wallet", label: "My Wallet" },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as typeof activeTab)}
-                className={`border-3 border-foreground px-6 py-3 font-bold transition-all ${
-                  activeTab === tab.id
-                    ? "bg-foreground text-background shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-                    : "bg-card hover:bg-muted"
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+          <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div
+              role="tablist"
+              aria-label="Payment sections"
+              className="flex flex-wrap gap-4"
+            >
+              {(
+                [
+                  { id: "schedule", label: "Schedule" },
+                  { id: "history", label: "History" },
+                ] as { id: ActiveTab; label: string }[]
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  id={`tab-${tab.id}`}
+                  aria-selected={activeTab === tab.id}
+                  aria-controls={`panel-${tab.id}`}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`border-3 border-foreground px-6 py-3 font-bold transition-all ${
+                    activeTab === tab.id
+                      ? "bg-foreground text-background shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
+                      : "bg-card hover:bg-muted"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {deals.length > 1 ? (
+              <div className="flex flex-col gap-2 rounded-3xl border-2 border-foreground/10 bg-muted p-4">
+                <Label htmlFor="deal-select" className="text-sm font-bold">
+                  Select deal
+                </Label>
+                <select
+                  id="deal-select"
+                  value={selectedDeal ?? ""}
+                  onChange={(event) => setSelectedDeal(event.target.value)}
+                  className="rounded-2xl border-2 border-foreground/20 bg-background px-4 py-3 text-foreground"
+                >
+                  {deals.map((deal) => (
+                    <option key={deal.dealId} value={deal.dealId}>
+                      {deal.leaseName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
           </div>
 
-          {/* Upcoming Payments Tab */}
-          {activeTab === "upcoming" && (
-            <div className="grid gap-6 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                  <h3 className="mb-6 text-lg font-bold">Payment Schedule</h3>
-                  <div className="space-y-3">
-                    {paymentSchedule.map((payment) => (
-                      <div
-                        key={`${payment.month}-${payment.dueDate}-${payment.amount}`}
-                        className={`flex items-center justify-between border-3 border-foreground p-4 ${
-                          payment.status === "upcoming" ? "bg-primary/10" : "bg-card"
-                        }`}
-                      >
-                        <div className="flex items-center gap-4">
-                          <div
-                            className={`flex h-10 w-10 items-center justify-center border-2 border-foreground ${
-                              payment.status === "upcoming" ? "bg-primary" : "bg-muted"
-                            }`}
-                          >
-                            {payment.status === "upcoming" ? (
-                              <AlertCircle className="h-5 w-5" />
-                            ) : (
-                              <Clock className="h-5 w-5" />
-                            )}
-                          </div>
-                          <div>
-                            <p className="font-bold">{payment.month}</p>
-                            <p className="text-sm text-muted-foreground">Due {payment.dueDate}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-4">
-                          <span className="font-mono font-bold">{formatCurrency(payment.amount)}</span>
-                          {payment.status === "upcoming" && (
-                            <Button className="border-2 border-foreground bg-primary font-bold shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
-                              Pay Now
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </div>
-
-              {/* Quick Pay */}
-              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                <h3 className="mb-4 text-lg font-bold">Quick Pay</h3>
-                <p className="mb-6 text-sm text-muted-foreground">
-                  Make a manual payment towards your next installment
-                </p>
-
-                <div className="mb-4 border-3 border-foreground bg-muted/50 p-4">
-                  <p className="text-sm text-muted-foreground">Wallet Balance</p>
-                  <p className="text-2xl font-bold">{formatCurrency(walletBalance)}</p>
-                  {walletBalance >= (nextPayment?.amount || 0) && (
-                    <p className="mt-1 text-sm text-secondary">Sufficient for next payment</p>
-                  )}
-                </div>
-
-                <Button className="mb-4 w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
-                  <Wallet className="mr-2 h-4 w-4" />
-                  Pay from Wallet
-                </Button>
-
-                <Button
-                  variant="outline"
-                  className="w-full border-3 border-foreground bg-transparent font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-                >
-                  <CreditCard className="mr-2 h-4 w-4" />
-                  Pay with Card
-                </Button>
-
-                <div className="mt-6 border-t-2 border-foreground pt-4">
-                  <p className="text-xs text-muted-foreground">
-                    Payments from your wallet are processed instantly. Card payments may take 1-2 business days.
+          {/* Schedule Tab Panel */}
+          <div
+            role="tabpanel"
+            id="panel-schedule"
+            aria-labelledby="tab-schedule"
+            tabIndex={0}
+            hidden={activeTab !== "schedule"}
+            className="space-y-6"
+          >
+            <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
+              <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="text-lg font-bold">Payment Schedule</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Track upcoming installments and pay the next due item from one place.
                   </p>
                 </div>
-              </Card>
-            </div>
-          )}
-
-          {/* Payment History Tab */}
-          {activeTab === "history" && (
-            <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-              <h3 className="mb-6 text-lg font-bold">Payment History</h3>
-              <div className="space-y-3">
-                {pastPayments.map((payment) => (
-                  <div
-                    key={`${payment.month}-${payment.paidDate}-${payment.amount}`}
-                    className="flex items-center justify-between border-b-2 border-foreground/10 pb-3 last:border-0"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="flex h-10 w-10 items-center justify-center border-2 border-foreground bg-secondary">
-                        <CheckCircle className="h-5 w-5" />
-                      </div>
-                      <div>
-                        <p className="font-bold">{payment.month}</p>
-                        <p className="text-sm text-muted-foreground">
-                          Paid on {payment.paidDate} via {payment.method}
-                        </p>
-                      </div>
+                {nextPayment ? (
+                  <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+                    <div className="rounded-3xl border-2 border-foreground/20 bg-muted p-4">
+                      <p className="text-sm text-muted-foreground">Next due installment</p>
+                      <p className="text-2xl font-bold">{formatNgn(nextPayment.amount)}</p>
+                      <p className="text-sm text-muted-foreground">Due {nextPayment.dueDate}</p>
                     </div>
-                    <div className="text-right">
-                      <p className="font-mono font-bold">{formatCurrency(payment.amount)}</p>
-                      <span className="border-2 border-foreground bg-secondary px-2 py-0.5 text-xs font-bold">Paid</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
-
-          {/* Wallet Tab */}
-          {activeTab === "wallet" && (
-            <div className="grid gap-6 lg:grid-cols-2">
-              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                <h3 className="mb-4 text-lg font-bold">Your Wallet</h3>
-                <div className="mb-6 border-3 border-foreground bg-primary/10 p-6">
-                  <p className="text-sm text-muted-foreground">Available Balance</p>
-                  <p className="text-4xl font-bold">{formatCurrency(walletBalance)}</p>
-                  <p className="mt-2 text-sm text-muted-foreground">Last top-up: {walletData.lastTopUp}</p>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="top-up-amount" className="font-bold">Top Up Amount</Label>
-                    <Input
-                      id="top-up-amount"
-                      type="number"
-                      value={topUpAmount}
-                      onChange={(e) => setTopUpAmount(e.target.value)}
-                      placeholder="Enter amount"
-                      className="border-3 border-foreground bg-background py-5 shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
-                    />
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[50000, 100000, 200000].map((amount) => (
-                      <button
-                        key={amount}
-                        onClick={() => setTopUpAmount(amount.toString())}
-                        className="border-2 border-foreground bg-muted p-2 text-sm font-bold transition-all hover:bg-muted/80"
+                    {selectedDeal ? (
+                      <Button
+                        variant="outline"
+                        onClick={() => setFullPaymentModalOpen(true)}
                       >
-                        {formatCurrency(amount)}
-                      </button>
-                    ))}
+                        Pay in Full
+                      </Button>
+                    ) : null}
                   </div>
-                  <Button className="w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
-                    <Plus className="mr-2 h-4 w-4" />
-                    Top Up Wallet
-                  </Button>
-                </div>
-              </Card>
+                ) : null}
+              </div>
 
-              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-                <h3 className="mb-4 text-lg font-bold">How Wallet Works</h3>
-                <div className="space-y-4">
-                  <div className="flex gap-4">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center border-2 border-foreground bg-primary font-bold">
-                      1
-                    </div>
-                    <div>
-                      <p className="font-bold">Top up your wallet</p>
-                      <p className="text-sm text-muted-foreground">
-                        Add funds anytime between payments to build up your balance
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex gap-4">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center border-2 border-foreground bg-secondary font-bold">
-                      2
-                    </div>
-                    <div>
-                      <p className="font-bold">Wallet is checked first</p>
-                      <p className="text-sm text-muted-foreground">
-                        When payment is due, we check your wallet balance first
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex gap-4">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center border-2 border-foreground bg-accent font-bold">
-                      3
-                    </div>
-                    <div>
-                      <p className="font-bold">Auto-debit covers the rest</p>
-                      <p className="text-sm text-muted-foreground">
-                        If wallet is insufficient, the remainder is charged to your linked account
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex gap-4">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center border-2 border-foreground bg-muted font-bold">
-                      4
-                    </div>
-                    <div>
-                      <p className="font-bold">Pay ahead anytime</p>
-                      <p className="text-sm text-muted-foreground">
-                        Make manual payments towards future installments whenever you want
-                      </p>
-                    </div>
-                  </div>
+              {paymentSchedule.length === 0 ? (
+                <div className="flex flex-col items-center py-12 text-center">
+                  <Calendar className="h-16 w-16 text-muted-foreground" aria-hidden="true" />
+                  <h3 className="mt-4 font-bold">No upcoming installments</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Your future repayment schedule will appear here when available.
+                  </p>
                 </div>
+              ) : (
+                <UpcomingScheduleTable
+                  schedule={paymentSchedule.map((payment) => ({
+                    period: payment.period,
+                    month: payment.month,
+                    amount: payment.amount,
+                    dueDate: payment.dueDate,
+                    status: payment.status,
+                    isNextDue: payment.isNextDue,
+                  }))}
+                  onPayNow={() => handleQuickPay("card")}
+                  optimisticStatuses={optimisticStatuses}
+                />
+              )}
 
-                <div className="mt-6 border-t-2 border-foreground pt-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-bold">Auto-pay Enabled</p>
-                      <p className="text-sm text-muted-foreground">Payments are automatically deducted</p>
-                    </div>
-                    <div className="flex h-6 w-12 items-center rounded-none border-2 border-foreground bg-secondary p-0.5">
-                      <div className="ml-auto h-4 w-4 border border-foreground bg-foreground" />
-                    </div>
-                  </div>
+              {isProcessing && (
+                <div aria-live="polite" className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Processing payment…
                 </div>
-              </Card>
-            </div>
-          )}
+              )}
+            </Card>
+          </div>
+
+          {/* History Tab Panel */}
+          <div
+            role="tabpanel"
+            id="panel-history"
+            aria-labelledby="tab-history"
+            tabIndex={0}
+            hidden={activeTab !== "history"}
+          >
+            <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
+              <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="text-lg font-bold">Payment History</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Review completed installments, download receipts, and confirm payment status.
+                  </p>
+                </div>
+                <div className="rounded-3xl border-2 border-foreground/20 bg-muted p-4 text-sm">
+                  {payments.length} payment{payments.length === 1 ? "" : "s"} recorded
+                </div>
+              </div>
+
+              <PaymentTimeline
+                payments={payments}
+                onDownloadReceipt={handleReceiptDownload}
+                onLoadMore={loadMore}
+                hasMore={hasMore}
+                isLoading={isHistoryLoading}
+                disputeStatusByPayment={disputeStatusByPayment}
+                onReportProblem={handleReportProblem}
+                onViewDispute={handleViewDispute}
+              />
+            </Card>
+          </div>
         </div>
       </main>
+
+      {disputeDialogPayment ? (
+        <DisputeDialog
+          payment={disputeDialogPayment}
+          open={true}
+          onOpenChange={(open) => {
+            if (!open) setDisputeDialogPayment(null)
+          }}
+          onFiled={handleDisputeFiled}
+        />
+      ) : null}
+
+      <Dialog open={viewDispute !== null} onOpenChange={(open) => { if (!open) setViewDispute(null) }}>
+        <DialogContent className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
+          <DialogHeader>
+            <DialogTitle>Dispute Status</DialogTitle>
+            <DialogDescription>
+              Track your dispute through review and resolution.
+            </DialogDescription>
+          </DialogHeader>
+          {viewDispute ? <DisputeStatusTimeline dispute={viewDispute} /> : null}
+        </DialogContent>
+      </Dialog>
+
+      {selectedDeal ? (
+        <FullPaymentModal
+          paymentId={selectedDeal}
+          open={fullPaymentModalOpen}
+          onOpenChange={setFullPaymentModalOpen}
+          onSuccess={handleFullPaymentSuccess}
+        />
+      ) : null}
     </div>
   )
 }

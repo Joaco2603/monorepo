@@ -1,0 +1,179 @@
+import { StubSorobanAdapter } from './stub-adapter.js'
+import { RecordReceiptParams } from './adapter.js'
+import { SorobanConfig } from './client.js'
+import { logger } from '../utils/logger.js'
+import { isDuplicateReceiptError } from './errors.js'
+
+/**
+ * TestSorobanAdapter extends StubSorobanAdapter with test-specific capabilities
+ * for integration testing. It tracks all recordReceipt() calls, simulates failures,
+ * and provides inspection methods to verify receipt parameters.
+ */
+export class TestSorobanAdapter extends StubSorobanAdapter {
+  private recordedReceipts: RecordReceiptParams[] = []
+  private shouldFailCount: number = 0
+  private shouldSimulateDuplicate: boolean = false
+  private rpcTimeoutRemaining: number = 0
+
+  constructor(config: SorobanConfig) {
+    super(config)
+    logger.info('Soroban adapter: test mode')
+  }
+
+  /**
+   * Simulates Soroban RPC timeouts on the next N chain read/write calls.
+   */
+  simulateRpcTimeout(count = 1): void {
+    this.rpcTimeoutRemaining = count
+    logger.debug('TestSorobanAdapter: configured to simulate RPC timeout', { count })
+  }
+
+  private maybeSimulateRpcTimeout(): void {
+    if (this.rpcTimeoutRemaining > 0) {
+      this.rpcTimeoutRemaining--
+      throw new Error('RPC request timed out after 30000ms')
+    }
+  }
+
+  async getBalance(account: string): Promise<bigint> {
+    this.maybeSimulateRpcTimeout()
+    return super.getBalance(account)
+  }
+
+  async getStakedBalance(account: string): Promise<bigint> {
+    this.maybeSimulateRpcTimeout()
+    return super.getStakedBalance(account)
+  }
+
+  async getClaimableRewards(account: string): Promise<bigint> {
+    this.maybeSimulateRpcTimeout()
+    return super.getClaimableRewards(account)
+  }
+
+  async executeTimelock(
+    txHash: string,
+    target: string,
+    functionName: string,
+    args: any[],
+    eta: number,
+  ): Promise<string> {
+    this.maybeSimulateRpcTimeout()
+    return super.executeTimelock(txHash, target, functionName, args, eta)
+  }
+
+  async cancelTimelock(txHash: string): Promise<string> {
+    this.maybeSimulateRpcTimeout()
+    return super.cancelTimelock(txHash)
+  }
+
+  // governance (issue #1494) — same fault-injection treatment as the other
+  // chain-bound calls so route-level retry/error handling can be exercised.
+  async createProposal(
+    params: Parameters<StubSorobanAdapter['createProposal']>[0],
+  ): ReturnType<StubSorobanAdapter['createProposal']> {
+    this.maybeSimulateRpcTimeout()
+    return super.createProposal(params)
+  }
+
+  async vote(
+    params: Parameters<StubSorobanAdapter['vote']>[0],
+  ): ReturnType<StubSorobanAdapter['vote']> {
+    this.maybeSimulateRpcTimeout()
+    return super.vote(params)
+  }
+
+  async submitGovernanceTransaction(signedXdr: string): Promise<{ txHash: string }> {
+    this.maybeSimulateRpcTimeout()
+    return super.submitGovernanceTransaction(signedXdr)
+  }
+
+  async finalizeProposal(proposalId: number): Promise<string> {
+    this.maybeSimulateRpcTimeout()
+    return super.finalizeProposal(proposalId)
+  }
+
+  async executeProposal(proposalId: number): Promise<string> {
+    this.maybeSimulateRpcTimeout()
+    return super.executeProposal(proposalId)
+  }
+
+  /**
+   * Records a receipt and tracks the call for test inspection.
+   * Can simulate transient failures or duplicate receipt errors based on configuration.
+   * Handles duplicate receipt errors as idempotent success, matching RealSorobanAdapter behavior.
+   */
+  async recordReceipt(params: RecordReceiptParams): Promise<void> {
+    // Track the call before any failure simulation
+    this.recordedReceipts.push({ ...params })
+
+    try {
+      // Simulate transient failures (e.g., network issues, temporary contract errors)
+      if (this.shouldFailCount > 0) {
+        this.shouldFailCount--
+        logger.debug('TestSorobanAdapter: simulating transient failure', {
+          remainingFailures: this.shouldFailCount,
+        })
+        throw new Error('Simulated transient failure')
+      }
+
+      // Simulate duplicate receipt error (contract rejection)
+      if (this.shouldSimulateDuplicate) {
+        logger.debug('TestSorobanAdapter: simulating duplicate receipt error')
+        throw new Error('Receipt already exists for tx_id')
+      }
+
+      // Call parent implementation for normal logging
+      return super.recordReceipt(params)
+    } catch (err) {
+      // Check if this is a duplicate receipt error (idempotent success)
+      // This matches the behavior in RealSorobanAdapter
+      if (isDuplicateReceiptError(err, params.txId)) {
+        logger.info('Receipt already recorded (idempotent success)', {
+          txId: params.txId,
+          txType: params.txType,
+        })
+        return
+      }
+
+      // Re-throw other errors
+      throw err
+    }
+  }
+
+  /**
+   * Returns all recorded receipt calls for test verification.
+   */
+  getRecordedReceipts(): RecordReceiptParams[] {
+    return [...this.recordedReceipts]
+  }
+
+  /**
+   * Configures the adapter to fail the next N recordReceipt() calls.
+   * Used to test retry logic and error recovery.
+   */
+  simulateFailures(count: number): void {
+    this.shouldFailCount = count
+    logger.debug('TestSorobanAdapter: configured to fail next N calls', { count })
+  }
+
+  /**
+   * Configures the adapter to simulate a duplicate receipt error on the next call.
+   * Used to test idempotency handling at the adapter layer.
+   */
+  simulateDuplicateError(): void {
+    this.shouldSimulateDuplicate = true
+    logger.debug('TestSorobanAdapter: configured to simulate duplicate error')
+  }
+
+  /**
+   * Resets all test state for cleanup between test cases.
+   */
+  reset(): void {
+    super._testOnlyReset()
+    this.recordedReceipts = []
+    this.shouldFailCount = 0
+    this.shouldSimulateDuplicate = false
+    this.rpcTimeoutRemaining = 0
+    logger.debug('TestSorobanAdapter: reset complete')
+  }
+}

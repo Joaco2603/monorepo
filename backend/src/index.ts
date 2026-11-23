@@ -1,47 +1,116 @@
+import { shutdownTracing } from "./tracing.js"
 import "dotenv/config"
-import cors from "cors"
-import express from "express"
-import morgan from "morgan"
-import { z } from "zod"
-import type { Request, Response } from "express"
+import { createApp } from "./app.js"
+import { maybeStartOutboxWorker } from "./outbox/workerEntry.js"
+import { env } from "./schemas/env.js"
+import { createRequire } from "node:module"
+import { getUsdcTokenAddress } from "./utils/token.js"
+import { runMigrationsIfNeeded } from "./migrations/runMigrations.js"
+import { validateCreditScoringConfig } from "./config/creditScoring.js"
+import { validatePiiEncryptionKey } from "./utils/piiEncryption.js"
+import { startBackupJob } from "./jobs/backupJob.js"
+import { ReconciliationWorker } from "./reconciliation/index.js"
+import { notificationWSS } from "./services/websocket/NotificationWebSocketServer.js"
+import { loadContractAddresses } from "./config/contractAddresses.js"
+import { RentWalletWorker } from "./workers/rentWalletWorker.js"
+import { createSorobanAdapter } from "./soroban/index.js"
+import { getSorobanConfigFromEnv } from "./soroban/client.js"
+import { closeDbPools } from "./db.js"
+import { closeRedis } from "./utils/redis.js"
 
-const envSchema = z.object({
-  PORT: z.coerce.number().default(4000),
-  NODE_ENV: z.string().default("development"),
-  CORS_ORIGINS: z.string().default("http://localhost:3000"),
-  SOROBAN_RPC_URL: z.string().url().default("https://soroban-testnet.stellar.org"),
-  SOROBAN_NETWORK_PASSPHRASE: z.string().default("Test SDF Network ; September 2015"),
-  SOROBAN_CONTRACT_ID: z.string().optional(),
-})
+const SHUTDOWN_TIMEOUT_MS = 20_000
 
-const env = envSchema.parse(process.env)
+const require = createRequire(import.meta.url)
+const { version } = require("../package.json") as { version: string }
 
-const app = express()
+// WEBHOOK_KEY and SECURE_CONFIG are validated by envSchema (see schemas/env.ts);
+// envSchema.parse() already throws/exits before this module runs if either is missing.
 
-app.use(morgan("dev"))
-app.use(express.json())
-app.use(
-  cors({
-    origin: env.CORS_ORIGINS.split(",").map((s: string) => s.trim()),
-  }),
-)
+if (env.NODE_ENV === 'production') {
+  try {
+    getUsdcTokenAddress()
+    console.log(`[backend] Environment validation passed for ${env.SOROBAN_NETWORK} network`)
+  } catch (error) {
+    console.error(`[backend] Environment validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    console.error(`[backend] Please check your environment variables and restart the server`)
+    process.exit(1)
+  }
+}
 
-app.get("/health", (_req: Request, res: Response) => {
-  res.json({
-    ok: true,
-    service: "shelterflex-backend",
-    env: env.NODE_ENV,
-  })
-})
+async function main() {
+  try {
+    loadContractAddresses(process.env)
+    validatePiiEncryptionKey(env.ENCRYPTION_KEY, env.NODE_ENV)
+    const { validateLatePaymentConfig } = await import('./config/latePayment.js')
+    validateLatePaymentConfig()
+    await runMigrationsIfNeeded()
+    const backupInterval = startBackupJob()
+    const app = createApp()
+    const outboxWorker = maybeStartOutboxWorker()
+    const reconciliationWorker = new ReconciliationWorker()
+    reconciliationWorker.start()
 
-app.get("/soroban/config", (_req: Request, res: Response) => {
-  res.json({
-    rpcUrl: env.SOROBAN_RPC_URL,
-    networkPassphrase: env.SOROBAN_NETWORK_PASSPHRASE,
-    contractId: env.SOROBAN_CONTRACT_ID ?? null,
-  })
-})
+    // Start RentWalletWorker for on-chain rent wallet mirroring
+    const sorobanConfig = getSorobanConfigFromEnv(process.env)
+    const sorobanAdapter = createSorobanAdapter(sorobanConfig)
+    const rentWalletWorker = new RentWalletWorker(sorobanAdapter)
+    rentWalletWorker.start()
 
-app.listen(env.PORT, () => {
-  console.log(`[backend] listening on http://localhost:${env.PORT}`)
-})
+    const server = app.listen(env.PORT, () => {
+      console.log(`[backend] listening on http://localhost:${env.PORT}`)
+    })
+    notificationWSS.attach(server)
+
+    let shuttingDown = false
+    const shutdown = async (signal: string) => {
+      if (shuttingDown) return
+      shuttingDown = true
+      console.log(`[backend] ${signal} received, starting graceful shutdown`)
+
+      const forceExitTimer = setTimeout(() => {
+        console.error("[backend] Graceful shutdown timed out, forcing exit")
+        process.exit(1)
+      }, SHUTDOWN_TIMEOUT_MS)
+      forceExitTimer.unref()
+
+      try {
+        if (backupInterval) clearInterval(backupInterval)
+        await reconciliationWorker.stop()
+        await rentWalletWorker.stop()
+        if (outboxWorker) await outboxWorker.stop()
+        await notificationWSS.close()
+        if (typeof app.locals.shutdownWorkers === "function") {
+          await app.locals.shutdownWorkers()
+        }
+        await shutdownTracing()
+
+        await new Promise<void>((resolve) => {
+          server.close((err) => {
+            if (err) console.error("[backend] Error closing HTTP server:", err)
+            resolve()
+          })
+        })
+
+        await closeDbPools()
+        await closeRedis()
+
+        clearTimeout(forceExitTimer)
+        console.log("[backend] Graceful shutdown complete")
+        process.exit(0)
+      } catch (error) {
+        clearTimeout(forceExitTimer)
+        console.error(`[backend] Error during graceful shutdown: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+        process.exit(1)
+      }
+    }
+
+    process.on("SIGTERM", () => void shutdown("SIGTERM"))
+    process.on("SIGINT", () => void shutdown("SIGINT"))
+  } catch (error) {
+    console.error(`[backend] Fatal startup error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+    process.exit(1)
+  }
+}
+
+void main()
+// Closes #1576: Addressed bundle size in backend build configuration

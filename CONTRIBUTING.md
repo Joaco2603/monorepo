@@ -1,14 +1,17 @@
 # Contributing to Shelterflex
 
-Thanks for contributing. This repo is intentionally split into **3 projects** (`frontend/`, `backend/`, `contracts/`) so you can contribute to one area without needing to touch the others.
+Thanks for contributing. Shelterflex is a **Rent Now, Pay Later (RNPL)** platform for rental markets — tenants pay a deposit upfront and repay the balance in installments, while landlords list properties directly. The platform relies on smart contracts for payments, escrow, staking, and a whistleblower rewards programme.
 
-If you’re looking for tasks to pick up, start with `docs/ISSUES_CATALOG.md`.
+This repo is intentionally split into **3 projects** (`frontend/`, `backend/`, `contracts/`) so you can contribute to one area without needing to touch the others.
+
+If you're looking for tasks to pick up, start with `docs/ISSUES_CATALOG.md`.
 
 ## Ways to contribute
 
 - Frontend: UI, UX, routing, components, state management, integration with backend and Soroban
 - Backend: API design, validation, auth, persistence, Soroban RPC integration, monitoring
 - Contracts: Soroban smart contracts, tests, deployment scripts, security hardening
+- Whistleblower programme: reward allocation logic, earnings dashboard, reporting flows
 
 ## Ground rules
 
@@ -25,32 +28,110 @@ If you’re looking for tasks to pick up, start with `docs/ISSUES_CATALOG.md`.
 
 ## Development setup
 
-### Frontend
+This repository has three independent projects, each with its own toolchain. Use the package manager and version below that matches CI.
+
+### Prerequisites
+
+- Node.js 22.x (CI uses Node 22)
+- pnpm 9.15.5 for the frontend
+- npm for the backend (CI uses `npm ci`)
+- Rust stable with `rustfmt` and `clippy` for the contracts workspace
+- Docker Desktop (optional, but useful for PostgreSQL and the full-stack compose setup)
+
+### Frontend setup (pnpm, Node 22)
 
 ```bash
 cd frontend
-npm install
-npm run dev
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run lint
+pnpm run build
 ```
 
-### Backend
+- The frontend uses pnpm, not npm.
+- `frontend/pnpm-lock.yaml` is the only lockfile. Do not run `npm install` in this
+  directory; it would create a `package-lock.json` that drifts from what CI validates.
+
+### Backend setup (npm, Node 22)
 
 ```bash
 cd backend
-npm install
+npm ci
 cp .env.example .env
+# Optional but recommended for local API development:
+docker compose up postgres -d
+npm run lint
+npm run test:ci
+npm run openapi:validate
+```
+
+The backend uses npm, not pnpm. The CI job runs `npm ci` and then the lint/test/OpenAPI checks below.
+
+Required environment variables for local backend work:
+
+- `cp .env.example .env` to create a local environment file.
+- `DATABASE_URL` is required for the API server. The default example points at a local PostgreSQL instance.
+- `ENCRYPTION_KEY` is required for local encryption helpers; the example value is fine for local development.
+- `CUSTODIAL_WALLET_MASTER_KEY_V1` and `CUSTODIAL_WALLET_MASTER_KEY_V2` can be left empty for basic local development, but wallet-related flows will need real values.
+- `RESEND_API_KEY` can stay empty; OTP delivery defaults to the console provider.
+
+For local development, the easiest path is to start PostgreSQL and then run the API:
+
+```bash
+cd backend
+cp .env.example .env
+docker compose up postgres -d
 npm run dev
 ```
 
-### Contracts
+The CI test command (`npm run test:ci`) excludes the network-dependent suites, so it does not require external Soroban or webhook services to pass.
+
+### Contracts setup (Rust stable + fmt/clippy)
 
 ```bash
 cd contracts
-cargo test
-stellar contract build
+rustup toolchain install stable
+rustup component add rustfmt clippy
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features
+cargo test --workspace
 ```
 
 For Soroban CLI deployment instructions see `contracts/README.md`.
+
+## Before opening a PR (required checks)
+
+Run the CI-equivalent commands from the matching directory before you push:
+
+### Frontend checks
+
+```bash
+cd frontend
+pnpm install --frozen-lockfile
+pnpm run lint
+pnpm run build
+```
+
+### Backend checks
+
+```bash
+cd backend
+npm ci
+npm run lint
+npm run test:ci
+npm run openapi:validate
+```
+
+### Contracts checks
+
+```bash
+cd contracts
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features
+cargo test --workspace
+```
+
+If your PR changes UI, include screenshots or a short screen recording in the PR description.
 
 ## Creating an issue
 
@@ -77,37 +158,6 @@ Before opening a new issue:
 - Comment on the issue saying you’re working on it.
 - Ask clarifying questions early.
 - If you’re blocked for >24h, leave an update.
-
-## Before opening a PR (required checks)
-
-Run the checks for the area you changed.
-
-### Frontend checks
-
-```bash
-cd frontend
-npm run lint
-npm run build
-```
-
-If your PR changes UI, include **screenshots** (or a short screen recording) in the PR description.
-
-### Backend checks
-
-```bash
-cd backend
-npm run lint
-npm run typecheck
-npm run build
-```
-
-### Contracts checks
-
-```bash
-cd contracts
-cargo test
-stellar contract build
-```
 
 ## If the repository is renamed on GitHub
 
@@ -185,6 +235,54 @@ git remote -v
 - No panics on user-controlled inputs unless the behavior is intentional and documented.
 
 ## PR process
+
+## PR description requirements (to pass CI)
+
+This repo runs a **PR Validation** check on every Pull Request. Your PR will fail if the PR description is empty or missing required sections.
+
+Minimum requirements:
+
+- The PR description must not be empty.
+- The PR description must include these headings (exact text):
+  - `## Summary`
+  - `## Changes`
+  - `## Checklist`
+
+Strongly recommended:
+
+- Link an issue in the PR description (example: `Closes #123`).
+
+If your PR is a **contract upgrade / deploy**, the validator will also require these headings:
+
+- `### Network`
+- `### New Contract`
+- `### Upgrade Governance`
+- `### Verification Steps`
+
+Copy/paste PR description example (passes validation):
+
+```md
+## Summary
+
+What does this PR do and why?
+
+## Linked issue
+
+Closes #123
+
+## Changes
+
+- Change 1
+- Change 2
+
+## Checklist
+
+- [ ] I tested locally
+- [ ] I did not commit secrets
+- [ ] I updated docs if needed
+- [ ] If UI changes: I included before/after screenshots
+- [ ] If images added/changed: I verified they are optimized and accessible
+```
 
 ### 0) Fork the repo (recommended for public contributions)
 

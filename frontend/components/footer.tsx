@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { Home, Mail, Phone, MapPin } from "lucide-react"
+import { useCookieConsentContext } from "@/contexts/CookieConsentContext"
 
 const footerLinks = {
   product: [
@@ -27,6 +28,7 @@ export function Footer() {
   const pathname = usePathname()
   const isAuthPage = pathname === "/login" || pathname === "/signup"
   const isDashboard = pathname.startsWith("/dashboard")
+  const { openPreferences } = useCookieConsentContext()
 
   if (isAuthPage || isDashboard) return null
 
@@ -41,7 +43,7 @@ export function Footer() {
                 <Home className="h-5 w-5 text-foreground" />
               </div>
               <span className="font-mono text-xl font-black tracking-tight">
-                SHELTA<span className="text-primary">FLEX</span>
+                SHELTERFLEX
               </span>
             </Link>
             <p className="text-background/70 mb-6 max-w-sm leading-relaxed">
@@ -50,11 +52,11 @@ export function Footer() {
             </p>
             <div className="space-y-3">
               <a
-                href="mailto:hello@sheltaflex.com"
+                href="mailto:hello@shelterflex.com"
                 className="flex items-center gap-3 text-background/70 hover:text-primary transition-colors"
               >
                 <Mail className="h-5 w-5" />
-                <span>hello@sheltaflex.com</span>
+                <span>hello@shelterflex.com</span>
               </a>
               <a
                 href="tel:+2341234567890"
@@ -124,6 +126,15 @@ export function Footer() {
                   </Link>
                 </li>
               ))}
+              <li>
+                <button
+                  onClick={openPreferences}
+                  className="text-background/70 hover:text-background transition-colors text-left"
+                  aria-label="Open cookie preference settings"
+                >
+                  Cookie Settings
+                </button>
+              </li>
             </ul>
           </div>
         </div>
@@ -132,7 +143,7 @@ export function Footer() {
         <div className="mt-16 pt-8 border-t border-background/20">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <p className="text-background/60 text-sm">
-              © 2026 Sheltaflex. All rights reserved.
+              © 2026 Shelterflex. All rights reserved.
             </p>
             <div className="flex items-center gap-4">
               <span className="text-background/60 text-sm">Follow us</span>
