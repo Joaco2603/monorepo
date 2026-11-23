@@ -31,7 +31,7 @@ class QuoteStore {
       fxRateNgnPerUsdc: input.fxRateNgnPerUsdc,
       feesNgn,
       expiresAt: new Date(now.getTime() + input.expiryMs),
-      status: 'active',
+      status: input.expiryMs <= 0 ? 'expired' : 'active',
       createdAt: now,
       updatedAt: now,
     }

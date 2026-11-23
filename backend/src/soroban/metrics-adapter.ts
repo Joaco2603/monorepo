@@ -74,6 +74,31 @@ export class MetricsSorobanAdapter implements SorobanAdapter {
     return this.trackCall('cancelTimelock', () => this.wrapped.cancelTimelock(txHash));
   }
 
+  // ── mvp_staking_pool (#1493) ──────────────────────────────────────────────
+  get mvpStakedBalance() {
+    if (!this.wrapped.mvpStakedBalance) return undefined
+    return (account: string) =>
+      this.trackCall('mvpStakedBalance', () => this.wrapped.mvpStakedBalance!(account))
+  }
+
+  get usedStake() {
+    if (!this.wrapped.usedStake) return undefined
+    return (account: string) =>
+      this.trackCall('usedStake', () => this.wrapped.usedStake!(account))
+  }
+
+  get unusedStake() {
+    if (!this.wrapped.unusedStake) return undefined
+    return (account: string) =>
+      this.trackCall('unusedStake', () => this.wrapped.unusedStake!(account))
+  }
+
+  get claimable() {
+    if (!this.wrapped.claimable) return undefined
+    return (account: string) =>
+      this.trackCall('claimable', () => this.wrapped.claimable!(account))
+  }
+
   // Optional admin operations
   async pause?(contractId: string): Promise<string> {
     if (!this.wrapped.pause) {

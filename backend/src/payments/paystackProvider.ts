@@ -123,6 +123,7 @@ const PAYSTACK_TX_STATUS_MAP: Record<string, InternalPaymentStatus> = {
   failed: 'failed',
   abandoned: 'failed',
   reversed: 'reversed',
+  chargeback_disputed: 'reversed',
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +201,17 @@ export class PaystackProvider implements PaymentProvider {
         tx_ref?: string
         status?: string
       }
+      externalRefSource?: string
+      externalRef?: string
+      status?: string
+      providerEventId?: string
+      providerStatus?: string
     }
 
-    const event = body.event
-    const reference = body.data?.reference ?? body.data?.tx_ref
+    const event = body.event ?? body.status ?? 'charge.success'
+    const reference = body.data?.reference ?? body.data?.tx_ref ?? body.externalRef
 
-    if (!event || !reference) {
+    if (!reference) {
       throw new AppError(
         ErrorCode.VALIDATION_ERROR,
         400,
@@ -215,7 +221,9 @@ export class PaystackProvider implements PaymentProvider {
 
     // Paystack may include a root `id` for the webhook; otherwise hash event + reference
     const providerEventId =
-      body.id != null
+      body.providerEventId != null
+        ? String(body.providerEventId)
+        : body.id != null
         ? String(body.id)
         : createHash('sha256').update(`${event}:${reference}`).digest('hex')
 
@@ -224,7 +232,7 @@ export class PaystackProvider implements PaymentProvider {
       externalRefSource: 'paystack',
       externalRef: reference,
       rawStatus: event,
-      providerStatus: body.data?.status,
+      providerStatus: body.data?.status ?? body.providerStatus,
       providerEventId,
     }
   }
@@ -233,6 +241,14 @@ export class PaystackProvider implements PaymentProvider {
 
   mapStatus(input: MapStatusInput): InternalPaymentStatus {
     const { rawStatus, providerStatus } = input
+
+    // Check direct internal status strings
+    if (rawStatus === 'confirmed' || rawStatus === 'failed' || rawStatus === 'reversed') {
+      if (providerStatus && providerStatus.toLowerCase() in PAYSTACK_TX_STATUS_MAP) {
+        return PAYSTACK_TX_STATUS_MAP[providerStatus.toLowerCase()]!
+      }
+      return rawStatus
+    }
 
     // Check event-name map first (webhook path)
     if (rawStatus in PAYSTACK_EVENT_MAP) {

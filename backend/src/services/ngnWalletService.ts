@@ -524,9 +524,21 @@ export class NgnWalletService {
     await this.getOrCreateWallet(userId)
     const userWithdrawals = this.withdrawals.filter(w => this.withdrawalUserIds.get(w.id) === userId)
     const limit = options.limit || 20
+    let startIndex = 0
+    if (options.cursor) {
+      const idx = userWithdrawals.findIndex(w => w.id === options.cursor)
+      if (idx >= 0) {
+        startIndex = idx + 1
+      }
+    }
+    const page = userWithdrawals.slice(startIndex, startIndex + limit)
+    const nextCursor = (startIndex + limit < userWithdrawals.length && page.length > 0)
+      ? page[page.length - 1].id
+      : null
+
     return {
-      entries: userWithdrawals.slice(0, limit),
-      nextCursor: null
+      entries: page,
+      nextCursor,
     }
   }
 

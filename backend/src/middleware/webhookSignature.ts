@@ -54,9 +54,16 @@ export function verifyPaystackSignature(
   next: NextFunction,
 ): void {
   try {
+    const isProduction = process.env.NODE_ENV === 'production'
+    const isEnabled = process.env.WEBHOOK_SIGNATURE_ENABLED === 'true'
+
+    if (!isProduction && !isEnabled) {
+      return next()
+    }
+
     const secret = getPaystackSecret()
     if (!secret) {
-      if (process.env.NODE_ENV === 'production') {
+      if (isProduction) {
         throw new AppError(ErrorCode.INTERNAL_ERROR, 500, 'PAYSTACK_SECRET_KEY not configured')
       }
       return next()
@@ -91,9 +98,16 @@ export function verifyFlutterwaveSignature(
   next: NextFunction,
 ): void {
   try {
+    const isProduction = process.env.NODE_ENV === 'production'
+    const isEnabled = process.env.WEBHOOK_SIGNATURE_ENABLED === 'true'
+
+    if (!isProduction && !isEnabled) {
+      return next()
+    }
+
     const secretHash = getFlutterwaveSecretHash()
     if (!secretHash) {
-      if (process.env.NODE_ENV === 'production') {
+      if (isProduction) {
         throw new AppError(ErrorCode.INTERNAL_ERROR, 500, 'FLUTTERWAVE_SECRET_HASH not configured')
       }
       return next()

@@ -278,6 +278,39 @@ export class CircuitBreakerAdapter implements SorobanAdapter {
     )
   }
 
+  // ── mvp_staking_pool (#1493) ──────────────────────────────────────────────
+  get mvpStakedBalance() {
+    if (!this.wrappedAdapter.mvpStakedBalance) return undefined
+    return (account: string) =>
+      this.executeWithCircuitBreaker('mvpStakedBalance', () =>
+        this.wrappedAdapter.mvpStakedBalance!(account),
+      )
+  }
+
+  get usedStake() {
+    if (!this.wrappedAdapter.usedStake) return undefined
+    return (account: string) =>
+      this.executeWithCircuitBreaker('usedStake', () =>
+        this.wrappedAdapter.usedStake!(account),
+      )
+  }
+
+  get unusedStake() {
+    if (!this.wrappedAdapter.unusedStake) return undefined
+    return (account: string) =>
+      this.executeWithCircuitBreaker('unusedStake', () =>
+        this.wrappedAdapter.unusedStake!(account),
+      )
+  }
+
+  get claimable() {
+    if (!this.wrappedAdapter.claimable) return undefined
+    return (account: string) =>
+      this.executeWithCircuitBreaker('claimable', () =>
+        this.wrappedAdapter.claimable!(account),
+      )
+  }
+
   // ── stake_delegation (#1489) ───────────────────────────────────────────────
   // Forwarded explicitly so the delegation routes see the methods through the
   // circuit-breaker wrapper; without these the wrapper hides them and the
