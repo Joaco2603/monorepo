@@ -89,4 +89,16 @@ describe('Staking Position (Real Adapter)', () => {
       claimable: '4.560000',
     })
   })
+
+  it('should return 503 when contract is genuinely unavailable', async () => {
+    vi.spyOn(RealSorobanAdapter.prototype, 'mvpStakedBalance').mockRejectedValue(new Error('RPC request timed out'))
+
+    const response = await request(app)
+      .get('/api/staking/mvp-position')
+      .set('Authorization', `Bearer ${authToken}`)
+      .set('x-wallet-address', walletAddress)
+      .expect(503)
+
+    expect(response.body.error).toBeDefined()
+  })
 })

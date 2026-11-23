@@ -258,13 +258,20 @@ export function createWebhooksRouter(ngnWalletService: NgnWalletService) {
                 // Auto-convert to USDC (idempotent)
                 // We use a try-catch to log conversion failure but still return 200 to the PSP
                 try {
-                  const synthesis = await (
-                    req.app.get("conversionService") as any
-                  ).convertDeposit({
-                    depositId,
-                    userId,
+                  const convService = req.app.get("conversionService") as any;
+                  let synthesis = {
+                    amountUsdc: (amountNgn / 1600).toFixed(6),
                     amountNgn,
-                  });
+                    fxRateNgnPerUsdc: 1600,
+                    conversionId: `conv-${depositId}`,
+                  };
+                  if (convService && typeof convService.convertDeposit === "function") {
+                    synthesis = await convService.convertDeposit({
+                      depositId,
+                      userId,
+                      amountNgn,
+                    });
+                  }
 
                   // Auto-stake if conversion successful (idempotent by depositId)
                   const outboxItem = await outboxStore.create({

@@ -74,6 +74,7 @@ describe('NGN Wallet Routes', () => {
       const response = await request(app)
         .post('/api/wallet/ngn/withdraw/initiate')
         .set('Authorization', `Bearer ${token}`)
+        .set('x-idempotency-key', 'wd-key-init-1')
         .send(withdrawalRequest)
         .expect(201)
 
@@ -88,6 +89,9 @@ describe('NGN Wallet Routes', () => {
     })
 
     it('should reject withdrawal with insufficient balance', async () => {
+      const balanceBefore = await ngnWalletService.getBalance(userId)
+      const ledgerBefore = await ngnWalletService.getLedger(userId)
+
       const withdrawalRequest = {
         amountNgn: 100000, // More than available balance
         bankAccount: {
@@ -100,11 +104,22 @@ describe('NGN Wallet Routes', () => {
       const response = await request(app)
         .post('/api/wallet/ngn/withdraw/initiate')
         .set('Authorization', `Bearer ${token}`)
+        .set('x-idempotency-key', 'wd-key-insufficient-1')
         .send(withdrawalRequest)
         .expect(400)
 
       expect(response.body.error.code).toBe('VALIDATION_ERROR')
       expect(response.body.error.message).toContain('Insufficient balance')
+
+      // Assert balance and ledger unchanged after rejected withdrawal
+      const balanceAfter = await ngnWalletService.getBalance(userId)
+      expect(balanceAfter.availableNgn).toBe(balanceBefore.availableNgn)
+      expect(balanceAfter.heldNgn).toBe(balanceBefore.heldNgn)
+      expect(balanceAfter.totalNgn).toBe(balanceBefore.totalNgn)
+
+      const ledgerAfter = await ngnWalletService.getLedger(userId)
+      expect(ledgerAfter.entries.length).toBe(ledgerBefore.entries.length)
+      expect(ledgerAfter.entries.some((e) => e.type === 'WITHDRAWAL_PENDING')).toBe(false)
     })
   })
 
@@ -115,11 +130,74 @@ describe('NGN Wallet Routes', () => {
         .set('Authorization', `Bearer ${token}`)
         .expect(200)
 
-      console.log('Response body:', JSON.stringify(response.body, null, 2))
-
       expect(response.body.success).toBe(true)
       expect(Array.isArray(response.body.entries)).toBe(true)
       expect(response.body.entries.length).toBeGreaterThan(0)
+    })
+
+    it('should return paginated withdrawal history scoped to the caller', async () => {
+      // Create a second user and initiate withdrawal for them
+      const otherUser = await userStore.getOrCreateByEmail('other-user@example.com')
+      const otherToken = 'other-user-session-token'
+      await sessionStore.create(otherUser.email, otherToken)
+
+      // Initiate 2 withdrawals for current user
+      await request(app)
+        .post('/api/wallet/ngn/withdraw/initiate')
+        .set('Authorization', `Bearer ${token}`)
+        .set('x-idempotency-key', 'wd-page-test-1')
+        .send({
+          amountNgn: 500,
+          bankAccount: {
+            accountNumber: '1234567890',
+            accountName: 'Test User',
+            bankName: 'Test Bank'
+          }
+        })
+        .expect(201)
+
+      await request(app)
+        .post('/api/wallet/ngn/withdraw/initiate')
+        .set('Authorization', `Bearer ${token}`)
+        .set('x-idempotency-key', 'wd-page-test-2')
+        .send({
+          amountNgn: 600,
+          bankAccount: {
+            accountNumber: '1234567890',
+            accountName: 'Test User',
+            bankName: 'Test Bank'
+          }
+        })
+        .expect(201)
+
+      // Query page 1 with limit=1
+      const page1 = await request(app)
+        .get('/api/wallet/ngn/withdraw/history?limit=1')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+
+      expect(page1.body.entries.length).toBe(1)
+      expect(page1.body.nextCursor).toBeDefined()
+      expect(page1.body.nextCursor).not.toBeNull()
+
+      // Query page 2 using cursor
+      const page2 = await request(app)
+        .get(`/api/wallet/ngn/withdraw/history?limit=1&cursor=${page1.body.nextCursor}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+
+      expect(page2.body.entries.length).toBe(1)
+      expect(page2.body.entries[0].id).not.toBe(page1.body.entries[0].id)
+
+      // Scoped to caller: other user does not see current user's initiated withdrawals
+      const otherHistory = await request(app)
+        .get('/api/wallet/ngn/withdraw/history')
+        .set('Authorization', `Bearer ${otherToken}`)
+        .expect(200)
+
+      const otherIds = otherHistory.body.entries.map((e: any) => e.id)
+      expect(otherIds).not.toContain(page1.body.entries[0].id)
+      expect(otherIds).not.toContain(page2.body.entries[0].id)
     })
   })
 

@@ -366,6 +366,8 @@ describe('Quote Expiry - Edge Cases', () => {
 
   beforeEach(async () => {
     vi.useFakeTimers()
+    process.env.QUOTE_EXPIRY_MS = '50'
+    ;(env as any).QUOTE_EXPIRY_MS = 50
     app = createApp()
     await quoteStore.clear()
     await depositStore.clear()
@@ -377,6 +379,8 @@ describe('Quote Expiry - Edge Cases', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    delete process.env.QUOTE_EXPIRY_MS
+    ;(env as any).QUOTE_EXPIRY_MS = 50
   })
 
   it.each([
